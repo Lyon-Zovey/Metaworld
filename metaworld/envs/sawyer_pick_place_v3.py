@@ -95,7 +95,7 @@ class SawyerPickPlaceEnvV3(SawyerXYZEnv):
             grasp_reward,
             in_place_reward,
         ) = self.compute_reward(action, obs)
-        success = float(obj_to_target <= 0.07)
+        success = float(obj_to_target <= 0.03)
         near_object = float(tcp_to_obj <= 0.03)
         assert self.obj_init_pos is not None
         grasp_success = float(

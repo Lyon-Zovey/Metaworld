@@ -154,3 +154,7 @@ flake.nix
 flake.lock
 .direnv
 .envrc
+
+# Dataset&traj
+rollout_data/
+dataset/

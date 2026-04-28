@@ -15,7 +15,7 @@ env_name = "door-lock-v3"
 
 random.seed(seed)
 ml1 = metaworld.MT50(seed=seed)
-env = ml1.train_classes[env_name]()
+env = ml1.train_classes[env_name](render_mode="human")
 task = [t for t in ml1.train_tasks if t.env_name == env_name][0]
 env.set_task(task)
 env.seed(seed)
@@ -32,7 +32,7 @@ info = {}
 while count < 500 and not done:
     action = p.get_action(obs)
     next_obs, _, _, _, info = env.step(action)
-    # env.render()
+    env.render()
     print(count, next_obs)
     if int(info["success"]) == 1:
         done = True
