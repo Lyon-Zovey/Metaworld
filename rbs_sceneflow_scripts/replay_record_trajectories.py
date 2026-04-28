@@ -181,12 +181,16 @@ def render_depth(renderer: mujoco.Renderer, data, cam_id: int) -> np.ndarray:
 
 def render_seg_body_ids(renderer: mujoco.Renderer, data, cam_id: int,
                         model) -> np.ndarray:
-    """Render per-pixel MuJoCo body IDs (-1 = background).  Same extra flip.
+    """Render per-pixel MuJoCo body IDs (0 = background).  Same extra flip.
 
     mujoco.Renderer with enable_segmentation_rendering() returns (H, W, 2) int32:
       [..., 0] = objid    – object index within its type (geom_id when type==GEOM)
       [..., 1] = objtype  – mjtObj enum value (mjOBJ_GEOM=5, mjOBJ_SITE=6, …)
     Background pixels have both channels == -1.
+
+    Background is mapped to 0 (world-body ID) so that convert_camera_depths.py
+    can identify background with ``seg_flat == 0``.  In practice no geom is
+    ever assigned to body-0 (the MuJoCo world body), so 0 is unambiguous.
     """
     renderer.update_scene(data, camera=cam_id)
     seg_raw = renderer.render()[::-1]   # (H, W, 2) int32, flip corrects orientation
@@ -199,7 +203,7 @@ def render_seg_body_ids(renderer: mujoco.Renderer, data, cam_id: int,
     # Safely map geom_id → body_id via model.geom_bodyid
     safe_geom_ids = np.clip(seg_raw[..., 0], 0, model.ngeom - 1)
     body_ids      = model.geom_bodyid[safe_geom_ids]
-    return np.where(geom_mask, body_ids, -1).astype(np.int32)  # (H, W)
+    return np.where(geom_mask, body_ids, 0).astype(np.int32)  # (H, W)
 
 
 def save_rgb_video(frames: list[np.ndarray], path: str, fps: float) -> None:
@@ -280,30 +284,46 @@ def replay_and_record_traj(
         rgb_frames.append(rgb)
 
         # Depth (metres, float32)
-        depth = render_depth(depth_ren, env.data, cam_id)
-        depth_frames.append(depth)
+        # Mask far-clipping-plane background pixels (sky / empty space) to 0 so
+        # that convert_camera_depths.py's ``valid = z > 0`` filter removes them.
+        depth_raw = render_depth(depth_ren, env.data, cam_id)
+        if depth_raw.size > 0:
+            far_thresh = float(depth_raw.max()) * 0.995
+            depth_raw = np.where(depth_raw >= far_thresh, 0.0, depth_raw)
+        depth_frames.append(depth_raw)
 
-        # Segmentation body-IDs
+        # Segmentation body-IDs (background = 0)
         seg = render_seg_body_ids(seg_ren, env.data, cam_id, env.model)
         seg_frames.append(seg)
 
-        # Camera pose
+        # Camera pose (cam-to-world 4×4, OpenGL convention)
         cam_pos, cam_xmat = get_cam_pose(env.data, cam_id)
         T_c2w = np.eye(4, dtype=np.float32)
         T_c2w[:3, :3] = cam_xmat
         T_c2w[:3, 3]  = cam_pos
         cam_poses.append(T_c2w)
 
-        cam_quat = mat3_to_quat_wxyz(cam_xmat)
+        # World-to-camera transform (R_w2c = R_c2w.T for orthonormal matrix)
+        R_w2c = cam_xmat.T                          # (3,3)
+        t_w2c = -(R_w2c @ cam_pos)                  # (3,)
 
-        # id_poses: per-body world-frame pose
+        # id_poses: per-body world-frame pose AND camera-frame pose
+        # camera_position/camera_quaternion = body's pose expressed in camera
+        # coordinates, as expected by convert_camera_depths.py for anchor tracking.
         for bid in body_ids_tracked:
-            pos  = np.copy(env.data.xpos [bid]).astype(np.float32)   # (3,)
-            quat = np.copy(env.data.xquat[bid]).astype(np.float32)   # (4,) w,x,y,z
-            id_buf[bid]["position"].append(pos)
-            id_buf[bid]["quaternion"].append(quat)
-            id_buf[bid]["camera_position"].append(cam_pos.copy())
-            id_buf[bid]["camera_quaternion"].append(cam_quat.copy())
+            # world-frame pose
+            pos_world  = np.copy(env.data.xpos [bid]).astype(np.float32)  # (3,)
+            quat_world = np.copy(env.data.xquat[bid]).astype(np.float32)  # (4,) w,x,y,z
+            id_buf[bid]["position"].append(pos_world)
+            id_buf[bid]["quaternion"].append(quat_world)
+
+            # camera-frame pose
+            pos_cam  = (R_w2c @ pos_world + t_w2c).astype(np.float32)    # (3,)
+            body_xmat = np.copy(env.data.xmat[bid]).reshape(3, 3).astype(np.float32)
+            R_body_cam = (R_w2c @ body_xmat).astype(np.float32)           # body→cam rot
+            quat_cam   = mat3_to_quat_wxyz(R_body_cam)                    # (4,) w,x,y,z
+            id_buf[bid]["camera_position"].append(pos_cam)
+            id_buf[bid]["camera_quaternion"].append(quat_cam)
 
     # ------------------------------------------------------------------ save camera_data/traj_N/
     cam_traj_dir = cam_data_root / traj_key

@@ -6,7 +6,7 @@ Reads from:
   camera_data/traj_N/
     rgb.mp4
     depth_video.npy    (T, H, W)  float16  metres
-    seg.npy            (T, H, W)  int32    body-IDs  (-1 = background)
+    seg.npy            (T, H, W)  int32    body-IDs  (0 = background / world body)
     traj_N.h5          (optional)  id_poses with body names
 
 Writes to the same traj_N/ directory:
@@ -120,48 +120,34 @@ def colourise_depth(
     d_min: float | None = None,
     d_max: float | None = None,
     cmap: str = "plasma",
-    bg_pct: float = 95.0,
+    bg_pct: float = 99.0,
 ) -> np.ndarray:
     """
     Map (H, W) float depth (metres) → (H, W, 3) uint8 colour image.
 
-    MuJoCo renders background / skybox pixels at the far clipping plane
-    (often 50-130 m).  These pixels cluster tightly at the max depth value
-    and can easily represent >30 % of pixels in a typical robot-arm scene.
+    Background / invalid pixels are stored as depth == 0 by
+    replay_record_trajectories.py (far-clipping-plane pixels are zeroed out
+    before saving).  Those pixels are rendered black.
 
-    Strategy:
-      1. Detect the far-plane value: the depth value that is within 0.5 % of
-         the global maximum is treated as "background".
-      2. Build a foreground mask that excludes those pixels.
-      3. If d_max is not supplied, use the 99th percentile of *foreground*
-         pixels so near/far variance is fully visible.
-      4. Background pixels are rendered black (clearly distinguishable).
+    d_min / d_max default to the 1st / bg_pct-th percentile of valid pixels so
+    that depth differences across the robot workspace are fully visible.
     """
     depth = depth.astype(np.float32)
-    valid = depth > 0
+    valid = depth > 0          # 0 = background / far-plane (already zeroed upstream)
 
     if not valid.any():
         return np.zeros((*depth.shape, 3), dtype=np.uint8)
 
-    # --- detect far-clipping-plane background --------------------------------
-    raw_max = float(depth[valid].max())
-    # pixels within 0.5 % of the global max are on the far plane
-    far_thresh = raw_max * 0.995
-    foreground = valid & (depth < far_thresh)
-
-    if not foreground.any():          # degenerate: all background
-        return np.zeros((*depth.shape, 3), dtype=np.uint8)
-
     if d_min is None:
-        d_min = float(np.percentile(depth[foreground], 1))
+        d_min = float(np.percentile(depth[valid], 1))
     if d_max is None:
-        d_max = float(np.percentile(depth[foreground], bg_pct))
+        d_max = float(np.percentile(depth[valid], bg_pct))
     if d_max <= d_min:
         d_max = d_min + 1e-4
 
     norm = np.clip((depth - d_min) / (d_max - d_min), 0.0, 1.0)
     coloured = apply_colormap(norm, cmap)
-    coloured[~foreground] = 0         # black for far-plane background pixels
+    coloured[~valid] = 0       # black for background pixels
     return coloured
 
 
@@ -241,16 +227,14 @@ def process_traj(
     seg_seq   = np.load(str(seg_path))                         # (T, H, W)  int32
     T, H, W   = depth_seq.shape
 
-    d_flat = depth_seq[depth_seq > 0].astype(np.float32)
-    raw_max = d_flat.max()
-    fg_flat = d_flat[d_flat < raw_max * 0.995]   # exclude far-plane background
-    d_vis_min = float(np.percentile(fg_flat, 1)) if fg_flat.size else 0.0
-    d_vis_max = float(np.percentile(fg_flat, 95)) if fg_flat.size else 1.0
-    bg_pct_val = 100.0 * (1 - fg_flat.size / d_flat.size)
+    d_flat = depth_seq[depth_seq > 0].astype(np.float32)  # depth=0 is background
+    d_vis_min = float(np.percentile(d_flat, 1))  if d_flat.size else 0.0
+    d_vis_max = float(np.percentile(d_flat, 99)) if d_flat.size else 1.0
+    bg_px = int((depth_seq == 0).sum())
+    bg_pct_val = 100.0 * bg_px / depth_seq.size
     print(f"    frames={T}  res={W}×{H}")
-    print(f"    depth  raw=[{d_flat.min():.3f}, {raw_max:.3f}] m  "
-          f"bg(far-plane)={bg_pct_val:.1f}%  "
-          f"→ fg vis range: [{d_vis_min:.3f}, {d_vis_max:.3f}] m")
+    print(f"    depth  fg range (1–99 pct): [{d_vis_min:.3f}, {d_vis_max:.3f}] m  "
+          f"background(depth=0): {bg_pct_val:.1f}%")
     body_names = load_body_names(traj_dir, traj_id)
     unique_ids = sorted(int(x) for x in np.unique(seg_seq) if x > 0)
     print(f"    seg    unique body-IDs: {unique_ids}")
