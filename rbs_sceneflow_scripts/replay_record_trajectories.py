@@ -135,9 +135,15 @@ def get_camera_id(model, cam_name: str) -> int:
     return cam_id
 
 
-def compute_intrinsics(model, cam_id: int, width: int, height: int) -> np.ndarray:
-    """Pinhole K matrix from MuJoCo camera FOV (square pixels assumed)."""
-    fovy_deg = float(model.cam_fovy[cam_id])
+def compute_intrinsics(model, cam_id: int, width: int, height: int,
+                       fovy_deg: float | None = None) -> np.ndarray:
+    """Pinhole K matrix from MuJoCo camera FOV (square pixels assumed).
+
+    If fovy_deg is provided it overrides the model's stored value (useful when
+    the camera pose has been overridden at runtime via override_camera_pose()).
+    """
+    if fovy_deg is None:
+        fovy_deg = float(model.cam_fovy[cam_id])
     fy = (height / 2.0) / np.tan(np.radians(fovy_deg) / 2.0)
     fx = fy  # MuJoCo renders with square pixels
     cx = width  / 2.0
@@ -145,6 +151,75 @@ def compute_intrinsics(model, cam_id: int, width: int, height: int) -> np.ndarra
     return np.array([[fx, 0., cx],
                      [0., fy, cy],
                      [0., 0., 1.]], dtype=np.float32)
+
+
+def _lookat_to_rotation(pos: np.ndarray, lookat: np.ndarray,
+                        up: np.ndarray | None = None) -> np.ndarray:
+    """Compute a 3×3 cam-to-world rotation matrix (OpenGL convention).
+
+    In OpenGL convention the camera looks along its *-z* axis, +y is up, +x
+    is right.  MuJoCo's cam_xmat stores columns [right | up | back] in world
+    coordinates (where back = +z_cam in world = the direction the camera
+    points *away* from).
+
+    Returns the 3×3 matrix whose columns are [right, up_corrected, back].
+    """
+    if up is None:
+        up = np.array([0., 0., 1.], dtype=np.float64)
+    forward = (lookat - pos).astype(np.float64)
+    forward /= np.linalg.norm(forward)          # unit vector toward target
+    right = np.cross(forward, up)
+    if np.linalg.norm(right) < 1e-6:            # forward is parallel to up
+        up = np.array([0., 1., 0.], dtype=np.float64)
+        right = np.cross(forward, up)
+    right /= np.linalg.norm(right)
+    up_corrected = np.cross(right, forward)     # re-orthogonalise
+    up_corrected /= np.linalg.norm(up_corrected)
+    back = -forward                             # camera looks along -z in world
+    # cam_xmat columns: right, up, back  (OpenGL / SAPIEN convention)
+    return np.stack([right, up_corrected, back], axis=1).astype(np.float32)
+
+
+def override_camera_pose(model, cam_id: int,
+                         pos: np.ndarray,
+                         lookat: np.ndarray | None = None,
+                         quat_wxyz: np.ndarray | None = None,
+                         fovy_deg: float | None = None) -> None:
+    """Override camera position/orientation in the MuJoCo model (in-place).
+
+    Exactly one of `lookat` or `quat_wxyz` must be provided to set orientation.
+
+    Args:
+        model:      mujoco.MjModel
+        cam_id:     camera index from get_camera_id()
+        pos:        (3,) world-frame camera position
+        lookat:     (3,) world-frame point the camera points at
+        quat_wxyz:  (4,) orientation quaternion (w, x, y, z)
+        fovy_deg:   vertical field-of-view in degrees (optional)
+
+    MuJoCo stores cam_pos0 / cam_mat0 as the *initial* pose and copies them
+    to cam_xpos / cam_xmat every time mj_kinematics() is called (for fixed
+    cameras with mode=0).  We overwrite cam_pos0 and cam_mat0 so the change
+    persists across all subsequent render calls without needing env.reset().
+    """
+    model.cam_pos0[cam_id] = pos.astype(np.float64)
+
+    if lookat is not None:
+        R = _lookat_to_rotation(pos, np.asarray(lookat, np.float64))
+        # cam_mat0 is stored row-major (9 floats); columns = [right, up, back]
+        model.cam_mat0[cam_id] = R.T.reshape(9)   # store as flattened row-major
+    elif quat_wxyz is not None:
+        try:
+            from scipy.spatial.transform import Rotation
+            w, x, y, z = quat_wxyz
+            R = Rotation.from_quat([x, y, z, w]).as_matrix().astype(np.float32)
+        except ImportError:
+            raise RuntimeError("scipy is required for quat_wxyz override; "
+                               "install it or use --cam-lookat instead.")
+        model.cam_mat0[cam_id] = R.T.reshape(9)
+
+    if fovy_deg is not None:
+        model.cam_fovy[cam_id] = float(fovy_deg)
 
 
 def get_cam_pose(data, cam_id: int) -> tuple[np.ndarray, np.ndarray]:
@@ -428,7 +503,21 @@ def main(args: argparse.Namespace) -> None:
     env, mt1 = build_env(env_name, seed, args.width, args.height)
 
     cam_id = get_camera_id(env.model, args.camera)
-    cam_K  = compute_intrinsics(env.model, cam_id, args.width, args.height)
+
+    # Optional runtime camera pose override
+    if args.cam_pos is not None:
+        cam_pos_arr = np.array(args.cam_pos, dtype=np.float64)
+        lookat_arr  = np.array(args.cam_lookat, dtype=np.float64) if args.cam_lookat else None
+        override_camera_pose(
+            env.model, cam_id,
+            pos=cam_pos_arr,
+            lookat=lookat_arr,
+            fovy_deg=args.cam_fovy,
+        )
+        print(f"Camera pose overridden: pos={args.cam_pos}  "
+              f"lookat={args.cam_lookat}  fovy={args.cam_fovy}")
+
+    cam_K = compute_intrinsics(env.model, cam_id, args.width, args.height)
 
     # Three independent mujoco.Renderer instances – all use the same no-flip
     # convention so RGB / depth / seg are spatially consistent with each other.
@@ -519,9 +608,32 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--fps",    type=float, default=30.0, help="FPS for rgb.mp4.")
     p.add_argument("--camera", type=str,   default="corner",
-                   help="MuJoCo camera name: corner | topview | behindGripper | gripperPOV")
+                   help="MuJoCo camera name to use as base: corner | topview | "
+                        "corner2 | corner3 | corner4")
     p.add_argument("--width",  type=int,   default=640)
     p.add_argument("--height", type=int,   default=480)
+
+    # ---- optional camera pose override ----------------------------------------
+    cam = p.add_argument_group(
+        "camera pose override",
+        "Override the selected camera's position/orientation at runtime. "
+        "If --cam-pos is given, --cam-lookat is also required (or the camera "
+        "keeps its original orientation from the XML)."
+    )
+    cam.add_argument(
+        "--cam-pos", type=float, nargs=3, default=None,
+        metavar=("X", "Y", "Z"),
+        help="Camera position in world frame, e.g. --cam-pos -1.1 -0.4 0.6",
+    )
+    cam.add_argument(
+        "--cam-lookat", type=float, nargs=3, default=None,
+        metavar=("X", "Y", "Z"),
+        help="World-frame point the camera looks at, e.g. --cam-lookat 0 0.6 0.2",
+    )
+    cam.add_argument(
+        "--cam-fovy", type=float, default=None,
+        help="Override vertical field-of-view in degrees (default: use XML value).",
+    )
     return p.parse_args()
 
 

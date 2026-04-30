@@ -169,8 +169,19 @@ def track_anchor_file_exact(
     out_path: Path,
     context: dict | None = None,
     anchor_array: np.ndarray | None = None,
+    anchor_idx: int = 0,
 ):
-    """Exact tracking logic from original anchor_tracker.py (no math rewrite)."""
+    """Track anchor frame forward in time, producing a sceneflow tensor.
+
+    The output has shape ``(T - anchor_idx, H, W, 3)`` so that frame 0 of the
+    tensor always corresponds to the anchor frame itself, and subsequent frames
+    show where each pixel's 3D point moves as the scene evolves.
+
+    Key fix: body-local coordinates are computed using the body pose at
+    ``anchor_idx``, NOT always at t=0.  Using t=0 for a non-zero anchor causes
+    all sceneflow files to look identical (they all reconstruct the scene from
+    the t=0 body pose perspective).
+    """
     folder = anchor_path.parent
     if anchor_array is None:
         anchor = np.load(anchor_path, allow_pickle=False)
@@ -202,6 +213,10 @@ def track_anchor_file_exact(
     else:
         raise ValueError(f"Unsupported anchor/seg shapes: {anchor.shape}")
 
+    # Clamp anchor_idx to valid range
+    anchor_idx = max(0, min(anchor_idx, T - 1))
+    T_out = T - anchor_idx          # number of output frames (anchor → end)
+
     N = pts.shape[0]
     p_local = np.full((N, 3), np.nan, dtype=np.float32)
 
@@ -213,13 +228,14 @@ def track_anchor_file_exact(
             continue
 
         pose = sid_data[sid_str]
-        pos0 = pose["pos"][0]
-        R0 = pose["rot"][0] if pose["rot"].ndim == 3 else pose["rot"]
+        # Use the body pose AT the anchor frame (not always t=0)
+        pos_a = pose["pos"][anchor_idx]
+        R_a   = pose["rot"][anchor_idx] if pose["rot"].ndim == 3 else pose["rot"]
 
-        T0 = np.eye(4, dtype=np.float32)
-        T0[:3, :3] = R0
-        T0[:3, 3] = pos0
-        T0_inv = np.linalg.inv(T0)
+        T_a = np.eye(4, dtype=np.float32)
+        T_a[:3, :3] = R_a
+        T_a[:3, 3]  = pos_a
+        T_a_inv = np.linalg.inv(T_a)
 
         mask = seg_flat == sid
         if not np.any(mask):
@@ -229,11 +245,12 @@ def track_anchor_file_exact(
             [pts_sel[:, :3], np.ones((pts_sel.shape[0], 1), dtype=np.float32)],
             axis=1,
         )
-        local_sel = (T0_inv @ homo.T).T[:, :3]
+        local_sel = (T_a_inv @ homo.T).T[:, :3]
         p_local[mask] = local_sel
 
-    frames = np.zeros((T, N, 3), dtype=np.float32)
-    # 背景点（sid==0）：不做 tracking，直接保留 ref 帧点并复制到所有帧
+    # Output: frames from anchor_idx to T-1 (inclusive)
+    frames = np.zeros((T_out, N, 3), dtype=np.float32)
+    # Background pixels: static – copy anchor positions to every output frame
     bg_mask = seg_flat == 0
     if np.any(bg_mask):
         frames[:, bg_mask, :] = pts[bg_mask][None, :, :]
@@ -256,18 +273,18 @@ def track_anchor_file_exact(
             [local_sel, np.ones((local_sel.shape[0], 1), dtype=np.float32)],
             axis=1,
         )
-        for t in range(T):
-            R = R_ts[t] if R_ts.ndim == 3 else R_ts
-            tvec = t_ts[t]
+        for out_t, abs_t in enumerate(range(anchor_idx, T)):
+            R    = R_ts[abs_t] if R_ts.ndim == 3 else R_ts
+            tvec = t_ts[abs_t]
             Tt = np.eye(4, dtype=np.float32)
             Tt[:3, :3] = R
-            Tt[:3, 3] = tvec
+            Tt[:3, 3]  = tvec
             res = (Tt @ local_h.T).T[:, :3]
-            frames[t, mask, :] = res
+            frames[out_t, mask, :] = res
 
     if pixel_shape is not None:
         H, W = pixel_shape
-        frames = frames.reshape((T, H, W, 3))
+        frames = frames.reshape((T_out, H, W, 3))
 
     np.save(out_path, frames.astype(np.float32))
     print(f"Tracked -> {out_path} shape={frames.shape}")
@@ -339,6 +356,7 @@ def process_folder(folder: Path, out_name_template: str = "scene_point_flow_ref{
             tracked_out_path,
             context=tracking_context,
             anchor_array=anchor_hw,
+            anchor_idx=idx,      # use the correct anchor frame index
         )
 
         saved += 1

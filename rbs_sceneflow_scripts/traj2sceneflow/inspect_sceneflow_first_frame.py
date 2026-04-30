@@ -126,6 +126,38 @@ def _load_seg_anchor(traj_dir: Path, frame_idx: int) -> Optional[np.ndarray]:
     return None
 
 
+def _load_cam_pose(traj_dir: Path, frame_idx: int) -> Optional[np.ndarray]:
+    """Load the 4×4 cam-to-world matrix for `frame_idx` from cam_poses.npy.
+    Returns None if not found."""
+    p = traj_dir / "cam_poses.npy"
+    if not p.exists():
+        return None
+    poses = np.load(p)          # (T, 4, 4)
+    if poses.ndim == 2:
+        return poses.astype(np.float32)
+    idx = min(frame_idx, poses.shape[0] - 1)
+    return poses[idx].astype(np.float32)
+
+
+def _anchor_to_world(xyz: np.ndarray, cam_pose: np.ndarray) -> np.ndarray:
+    """Transform (H, W, 3) anchor points from camera space to world space.
+
+    anchor.npy was computed from depth images that were vertically flipped
+    ([::-1]) before saving.  The unprojection formula y = (cy - vv) * z / fy
+    therefore produces a Y value whose sign is *inverted* relative to the
+    physical camera Y axis.  We correct this before applying the cam-to-world
+    rotation so that the resulting world coordinates match Metaworld's Z-up
+    convention (table ≈ z=0, robot arm z > 0).
+    """
+    H, W = xyz.shape[:2]
+    pts = xyz.reshape(-1, 3).copy()
+    pts[:, 1] *= -1                         # correct the y-flip artifact
+    R = cam_pose[:3, :3]                    # cam-to-world rotation
+    t = cam_pose[:3, 3]                     # cam-to-world translation
+    pts_world = (R @ pts.T).T + t
+    return pts_world.reshape(H, W, 3)
+
+
 def _load_id_to_name(traj_dir: Path) -> dict[int, str]:
     """`{seg_id: actor_name}` from any `traj_<i>.h5` in `traj_dir`. Returns
     empty dict if absent (then no semantic filtering is possible)."""
@@ -197,6 +229,10 @@ def _make_panel(
     out_png: Path,
     title: str,
     max_3d_points: int = 60_000,
+    no_filter: bool = False,
+    cam_pose: Optional[np.ndarray] = None,
+    flow_last: Optional[np.ndarray] = None,   # (H, W, 3) last frame of full flow
+    rgb_last: Optional[np.ndarray] = None,    # last RGB frame for comparison
 ) -> None:
     import matplotlib
 
@@ -208,49 +244,84 @@ def _make_panel(
     H, W = xyz.shape[:2]
     valid = np.isfinite(xyz).all(axis=-1)
 
-    # If no semantic foreground filter is available, fall back to a geometric
-    # heuristic: drop anything farther than 1.2 m from the median-z plane.
-    # This is a coarse "drop ground/walls" hack; explicit seg-based filter
-    # above is much cleaner when present.
-    if fg_mask is None:
+    if no_filter:
+        # Show every finite point; disable all background filtering
+        fg_mask = valid
+    elif fg_mask is None:
+        # If no semantic foreground filter is available, fall back to a geometric
+        # heuristic: drop anything farther than 1.2 m from the median-z plane.
         z = xyz[..., 2]
         z_med = float(np.nanmedian(z[valid]))
         fg_mask = valid & (np.abs(z - z_med) < 1.2)
-    fg_mask = fg_mask & valid
+    else:
+        fg_mask = fg_mask & valid
 
-    fig = plt.figure(figsize=(16, 11))
-    gs = GridSpec(2, 2, figure=fig, hspace=0.18, wspace=0.12)
+    fig = plt.figure(figsize=(24, 11))
+    gs = GridSpec(2, 3, figure=fig, hspace=0.22, wspace=0.14)
 
     # ── (a) RGB anchor frame ────────────────────────────────────────────────
     ax_rgb = fig.add_subplot(gs[0, 0])
     if rgb is not None:
         ax_rgb.imshow(rgb)
-        ax_rgb.set_title("(a) rgb anchor frame  (what base_camera renders)")
+        ax_rgb.set_title("(a) rgb  anchor frame")
     else:
         ax_rgb.text(0.5, 0.5, "rgb.mp4 unavailable", ha="center", va="center")
-        ax_rgb.set_title("(a) rgb anchor frame")
+        ax_rgb.set_title("(a) rgb  anchor frame")
     ax_rgb.axis("off")
 
     # ── (b) depth (sceneflow z) heatmap, pixel-aligned with rgb ────────────
     ax_z = fig.add_subplot(gs[0, 1])
-    z_disp = xyz[..., 2].copy()
+    z_disp = -xyz[..., 2].copy()          # negate: positive = farther away
     z_disp[~valid] = np.nan
     z_finite = z_disp[np.isfinite(z_disp)]
     if z_finite.size:
         vmin, vmax = np.percentile(z_finite, [1.0, 99.0])
     else:
-        vmin, vmax = -1.0, 1.0
+        vmin, vmax = 0.0, 5.0
     im = ax_z.imshow(z_disp, cmap="turbo", vmin=vmin, vmax=vmax)
     ax_z.set_title(
-        "(b) sceneflow z, pixel-aligned with (a)\n"
-        "    (this IS the 0-th sceneflow frame as an image)"
+        "(b) depth from anchor.npy  (bright = farther)"
     )
     ax_z.axis("off")
     cb = plt.colorbar(im, ax=ax_z, fraction=0.046, pad=0.02)
-    cb.set_label("world z [m]  (camera optical axis)")
+    cb.set_label("depth [m]")
+
+    # ── (c) displacement heatmap  anchor→last frame ─────────────────────────
+    ax_disp = fig.add_subplot(gs[0, 2])
+    if flow_last is not None:
+        disp_map = np.linalg.norm(flow_last - xyz, axis=-1)  # (H, W)
+        disp_map[~valid] = np.nan
+        d_valid = disp_map[np.isfinite(disp_map)]
+        d_max = float(np.percentile(d_valid, 99.0)) if d_valid.size else 0.5
+        im_d = ax_disp.imshow(disp_map, cmap="hot", vmin=0.0, vmax=d_max)
+        cb_d = plt.colorbar(im_d, ax=ax_disp, fraction=0.046, pad=0.02)
+        cb_d.set_label("3D disp [m]")
+        moving_pct = 100.0 * float((disp_map > 0.02).sum()) / max(int(valid.sum()), 1)
+        ax_disp.set_title(
+            f"(c) 3D displacement  anchor→last\n"
+            f"    bright = large motion;  >2cm: {moving_pct:.1f}% of pixels"
+        )
+    else:
+        ax_disp.text(0.5, 0.5, "flow .npy unavailable\n(run flow_compress first)",
+                     ha="center", va="center", fontsize=9)
+        ax_disp.set_title("(c) 3D displacement  (unavailable)")
+    ax_disp.axis("off")
+
+    # ── 3D representation: prefer world space if cam_pose is available ─────
+    # anchor.npy stores camera-space XYZ (z<0 = in front of camera).
+    # Transform to world space so the plot shows the scene in a natural
+    # Z-up orientation (robot base ≈ z=0, table z≈0, arm z>0).
+    if cam_pose is not None:
+        xyz_3d = _anchor_to_world(xyz, cam_pose)
+        coord_label = "world"
+        elev, azim = 30, -60        # oblique bird's-eye for Z-up world
+    else:
+        xyz_3d = xyz
+        coord_label = "camera"
+        elev, azim = 22, -65        # original angles for camera space
 
     # ── prep 3D points (foreground only) ───────────────────────────────────
-    pts_fg = xyz[fg_mask]
+    pts_fg = xyz_3d[fg_mask]
     n_fg = int(pts_fg.shape[0])
     if rgb is not None:
         rgb_fg = (rgb[fg_mask].astype(np.float32) / 255.0).clip(0.0, 1.0)
@@ -272,11 +343,11 @@ def _make_panel(
         seg_rgb_fg = seg_rgb_fg[idx]
 
     def _setup_3d(ax, title: str) -> None:
-        ax.set_xlabel("world x [m]")
-        ax.set_ylabel("world y [m]")
-        ax.set_zlabel("world z [m]")
+        ax.set_xlabel(f"{coord_label} x [m]")
+        ax.set_ylabel(f"{coord_label} y [m]")
+        ax.set_zlabel(f"{coord_label} z [m]")
         ax.set_title(title)
-        ax.view_init(elev=22, azim=-65)
+        ax.view_init(elev=elev, azim=azim)
         if pts_fg.shape[0] > 0:
             for axis_name, vals in zip("xyz", pts_fg.T):
                 lo, hi = float(vals.min()), float(vals.max())
@@ -288,24 +359,24 @@ def _make_panel(
             except Exception:
                 pass
 
-    # ── (c) 3D point cloud, RGB-colored ────────────────────────────────────
+    # ── (d) 3D point cloud, RGB-colored ────────────────────────────────────
     ax_pc = fig.add_subplot(gs[1, 0], projection="3d")
     if n_fg:
         ax_pc.scatter(pts_fg[:, 0], pts_fg[:, 1], pts_fg[:, 2],
                       c=rgb_fg, s=2.0, marker=".", linewidths=0)
     _setup_3d(
         ax_pc,
-        f"(c) 3D point cloud, RGB-colored  (foreground only, N={n_fg:,})",
+        f"(d) 3D cloud, RGB-colored  [{coord_label} space]  N={n_fg:,}",
     )
 
-    # ── (d) 3D point cloud, seg-id colored ─────────────────────────────────
+    # ── (e) 3D point cloud, seg-id colored ─────────────────────────────────
     ax_id = fig.add_subplot(gs[1, 1], projection="3d")
     if n_fg:
         ax_id.scatter(pts_fg[:, 0], pts_fg[:, 1], pts_fg[:, 2],
                       c=seg_rgb_fg, s=2.0, marker=".", linewidths=0)
-    _setup_3d(ax_id, "(d) 3D point cloud, seg-id colored")
+    _setup_3d(ax_id, f"(e) 3D cloud, seg-id colored  [{coord_label} space]")
 
-    # legend for (d): show up to 12 most-populous seg ids
+    # legend for (e): show up to 12 most-populous seg ids
     if seg is not None and id_to_name and n_fg:
         seg_fg_full = seg[fg_mask]
         ids, counts = np.unique(seg_fg_full, return_counts=True)
@@ -323,6 +394,20 @@ def _make_panel(
         ax_id.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.05, 1.0),
                      fontsize=7, frameon=False)
 
+    # ── (f) RGB last frame (comparison with anchor) ─────────────────────────
+    ax_rgb_last = fig.add_subplot(gs[1, 2])
+    if rgb_last is not None:
+        ax_rgb_last.imshow(rgb_last)
+        ax_rgb_last.set_title("(f) rgb  last frame  (compare with (a))")
+    elif flow_last is not None:
+        ax_rgb_last.text(0.5, 0.5, "rgb last frame\nnot loaded",
+                         ha="center", va="center", fontsize=9)
+        ax_rgb_last.set_title("(f) rgb  last frame")
+    else:
+        ax_rgb_last.text(0.5, 0.5, "flow .npy unavailable", ha="center", va="center", fontsize=9)
+        ax_rgb_last.set_title("(f) rgb  last frame")
+    ax_rgb_last.axis("off")
+
     # ── footer / global title ──────────────────────────────────────────────
     drop_pct = 100.0 * (1.0 - n_fg / max(int(valid.sum()), 1))
     fig.suptitle(
@@ -337,7 +422,7 @@ def _make_panel(
 
 
 # ─── per-traj driver ────────────────────────────────────────────────────────
-def _process_traj(traj_dir: Path) -> int:
+def _process_traj(traj_dir: Path, no_filter: bool = False) -> int:
     """Render one PNG per anchor frame found in `traj_dir`.
 
     Returns the number of anchors successfully rendered.
@@ -363,11 +448,32 @@ def _process_traj(traj_dir: Path) -> int:
             continue
         rgb = _read_rgb_frame(traj_dir, anchor_idx)
         seg = _load_seg_anchor(traj_dir, anchor_idx)
-        fg_mask = _foreground_mask(seg, id_to_name)
-        out = traj_dir / f"_sceneflow_check_ref{anchor}.png"
+        cam_pose = _load_cam_pose(traj_dir, anchor_idx)
+        fg_mask = None if no_filter else _foreground_mask(seg, id_to_name)
+
+        # Load full flow to compute displacement and last-frame comparison
+        flow_last: Optional[np.ndarray] = None
+        rgb_last: Optional[np.ndarray] = None
+        if pf_npy is not None and pf_npy.exists():
+            try:
+                full_flow = np.load(str(pf_npy))  # (T, H, W, 3)
+                if full_flow.ndim == 4 and full_flow.shape[0] > 1:
+                    flow_last = full_flow[-1]      # (H, W, 3) last frame XYZ
+                    last_idx = anchor_idx + full_flow.shape[0] - 1
+                    rgb_last = _read_rgb_frame(traj_dir, last_idx)
+            except Exception as exc:              # noqa: BLE001
+                print(f"  [warn] could not load full flow {pf_npy.name}: {exc}")
+
+        suffix = "_nofilter" if no_filter else ""
+        out = traj_dir / f"_sceneflow_check_ref{anchor}{suffix}.png"
         _make_panel(
             rgb, xyz, fg_mask, seg, id_to_name, out,
-            title=f"{traj_dir.name}  ref{anchor}  (frame {anchor_idx})",
+            title=f"{traj_dir.name}  ref{anchor}  (frame {anchor_idx})"
+                  + ("  [no filter]" if no_filter else ""),
+            no_filter=no_filter,
+            cam_pose=cam_pose,
+            flow_last=flow_last,
+            rgb_last=rgb_last,
         )
         extras = []
         if rgb is None:
@@ -387,13 +493,19 @@ def main() -> int:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--traj-dir", type=Path, help="single camera_data/traj_<i> dir")
     g.add_argument("--root",     type=Path, help="save_dir; processes every traj under <root>/camera_data/")
+    ap.add_argument(
+        "--no-filter", action="store_true",
+        help="Disable all background filtering (semantic and geometric); "
+             "show the raw point cloud exactly as recorded. "
+             "Output PNGs are named *_nofilter.png to avoid overwriting filtered ones.",
+    )
     args = ap.parse_args()
 
     if args.traj_dir is not None:
         if not args.traj_dir.is_dir():
             print(f"--traj-dir does not exist: {args.traj_dir}", file=sys.stderr)
             return 2
-        n_imgs = _process_traj(args.traj_dir)
+        n_imgs = _process_traj(args.traj_dir, no_filter=args.no_filter)
         return 0 if n_imgs > 0 else 1
 
     cam_root = args.root / "camera_data" if (args.root / "camera_data").is_dir() else args.root
@@ -407,7 +519,7 @@ def main() -> int:
     total_imgs = 0
     n_traj_ok = 0
     for p in trajs:
-        k = _process_traj(p)
+        k = _process_traj(p, no_filter=args.no_filter)
         total_imgs += k
         if k > 0:
             n_traj_ok += 1
