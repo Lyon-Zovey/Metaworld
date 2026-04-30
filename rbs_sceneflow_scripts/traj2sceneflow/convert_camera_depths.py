@@ -88,7 +88,15 @@ def find_h5_with_id_poses(folder: Path):
 
 
 def _load_tracking_context(folder: Path):
-    """Load reusable tracking context once per folder (for speed)."""
+    """Load reusable tracking context once per folder (for speed).
+
+    The full ``seg`` array is kept in the context so that each call to
+    ``track_anchor_file_exact`` can use ``seg[anchor_idx]`` as the
+    pixel→sid mapping — matching the MIKASA-Robo convention.  Using a
+    hard-coded ``seg[0]`` for every anchor is wrong: it makes all five
+    sceneflow files look identical and silently drops actors that were not
+    visible at frame 0.
+    """
     seg_candidates = [folder / "seg.npy", folder / "segmentation.npy"]
     seg_path = None
     for c in seg_candidates:
@@ -98,13 +106,10 @@ def _load_tracking_context(folder: Path):
     if seg_path is None:
         raise FileNotFoundError(f"seg.npy not found in {folder}")
 
-    seg = np.load(seg_path, allow_pickle=False)
-    if getattr(seg, "ndim", 0) >= 3 and seg.shape[0] > 1:
-        seg0 = seg[0]
-    else:
-        seg0 = seg
-    seg_flat = seg0.reshape(-1)
-    pixel_shape = seg0.shape if seg0.ndim == 2 else None
+    seg_all = np.load(seg_path, allow_pickle=False)  # (T, H, W) or (H, W)
+    if seg_all.ndim == 2:
+        seg_all = seg_all[None, ...]                  # treat as single frame
+    pixel_shape = (int(seg_all.shape[1]), int(seg_all.shape[2]))
 
     h5_path, traj_group = find_h5_with_id_poses(folder)
     if h5_path is None:
@@ -156,11 +161,10 @@ def _load_tracking_context(folder: Path):
         raise RuntimeError("Cannot determine T from id_poses")
 
     return {
-        "seg_flat": seg_flat,
+        "seg_all": seg_all,        # full (T, H, W) — per-anchor slice in tracker
         "pixel_shape": pixel_shape,
         "sid_data": sid_data,
         "T": int(T),
-        "unique_sids": np.unique(seg_flat),
     }
 
 
@@ -191,11 +195,17 @@ def track_anchor_file_exact(
     if context is None:
         context = _load_tracking_context(folder)
 
-    seg_flat = context["seg_flat"]
+    seg_all    = context["seg_all"]     # (T_seg, H, W)
     pixel_shape = context["pixel_shape"]
-    sid_data = context["sid_data"]
-    T = context["T"]
-    unique_sids = context["unique_sids"]
+    sid_data   = context["sid_data"]
+    T          = context["T"]
+
+    # Use seg[anchor_idx] for the pixel→sid mapping, NOT seg[0].
+    # This matches the MIKASA-Robo convention and ensures actors that first
+    # appear after frame 0 (or move significantly) are tracked correctly.
+    a = max(0, min(anchor_idx, int(seg_all.shape[0]) - 1))
+    seg_flat    = seg_all[a].reshape(-1)
+    unique_sids = np.unique(seg_flat)
 
     if anchor.ndim == 3 and anchor.shape[2] == 3 and pixel_shape is not None and anchor.shape[0:2] == pixel_shape:
         H, W = pixel_shape
@@ -215,7 +225,6 @@ def track_anchor_file_exact(
 
     # Clamp anchor_idx to valid range
     anchor_idx = max(0, min(anchor_idx, T - 1))
-    T_out = T - anchor_idx          # number of output frames (anchor → end)
 
     N = pts.shape[0]
     p_local = np.full((N, 3), np.nan, dtype=np.float32)
@@ -229,8 +238,9 @@ def track_anchor_file_exact(
 
         pose = sid_data[sid_str]
         # Use the body pose AT the anchor frame (not always t=0)
-        pos_a = pose["pos"][anchor_idx]
-        R_a   = pose["rot"][anchor_idx] if pose["rot"].ndim == 3 else pose["rot"]
+        pos_ref_idx = min(anchor_idx, int(pose["pos"].shape[0]) - 1)
+        pos_a = pose["pos"][pos_ref_idx]
+        R_a   = pose["rot"][pos_ref_idx] if pose["rot"].ndim == 3 else pose["rot"]
 
         T_a = np.eye(4, dtype=np.float32)
         T_a[:3, :3] = R_a
@@ -248,9 +258,12 @@ def track_anchor_file_exact(
         local_sel = (T_a_inv @ homo.T).T[:, :3]
         p_local[mask] = local_sel
 
-    # Output: frames from anchor_idx to T-1 (inclusive)
-    frames = np.zeros((T_out, N, 3), dtype=np.float32)
-    # Background pixels: static – copy anchor positions to every output frame
+    # Output: FULL trajectory (T frames), matching MIKASA-Robo convention.
+    # frames[t] gives camera-space XYZ of each anchor-frame pixel at timestep t.
+    # This means ref00070 still outputs (T, H, W, 3) — its pixels' positions
+    # over the whole trajectory (including past frames before the anchor).
+    frames = np.zeros((T, N, 3), dtype=np.float32)
+    # Background pixels (sid==0): static — replicate anchor-frame positions
     bg_mask = seg_flat == 0
     if np.any(bg_mask):
         frames[:, bg_mask, :] = pts[bg_mask][None, :, :]
@@ -273,21 +286,21 @@ def track_anchor_file_exact(
             [local_sel, np.ones((local_sel.shape[0], 1), dtype=np.float32)],
             axis=1,
         )
-        for out_t, abs_t in enumerate(range(anchor_idx, T)):
-            R    = R_ts[abs_t] if R_ts.ndim == 3 else R_ts
-            tvec = t_ts[abs_t]
+        for t in range(T):
+            R    = R_ts[t] if R_ts.ndim == 3 else R_ts
+            tvec = t_ts[t]
             Tt = np.eye(4, dtype=np.float32)
             Tt[:3, :3] = R
             Tt[:3, 3]  = tvec
             res = (Tt @ local_h.T).T[:, :3]
-            frames[out_t, mask, :] = res
+            frames[t, mask, :] = res
 
     if pixel_shape is not None:
         H, W = pixel_shape
-        frames = frames.reshape((T_out, H, W, 3))
+        frames = frames.reshape((T, H, W, 3))
 
     np.save(out_path, frames.astype(np.float32))
-    print(f"Tracked -> {out_path} shape={frames.shape}")
+    print(f"Tracked -> {out_path} shape={frames.shape} ref_frame={anchor_idx}")
 
 def process_folder(folder: Path, out_name_template: str = "scene_point_flow_ref{idx:05d}.anchor.npy"):
     depth_path = folder / "depth_video.npy"
