@@ -10,9 +10,10 @@ ENV_NAME="${ENV_NAME:-drawer-close-v3}"
 NUM_EPISODES="${NUM_EPISODES:-5}"
 # ────────────────────────────────────────────────────────────
 
+SAVE_DIR="${SAVE_DIR:-dataset}"
 H5_FILE="rollout_data/${ENV_NAME}/trajectory.state.mocap_xyz.mujoco_cpu.h5"
 JSON_FILE="rollout_data/${ENV_NAME}/trajectory.state.mocap_xyz.mujoco_cpu.json"
-DATASET_DIR="dataset/${ENV_NAME}/camera_data"
+DATASET_DIR="${SAVE_DIR}/${ENV_NAME}/camera_data"
 
 echo ""
 echo "========================================================="
@@ -34,7 +35,7 @@ _CAMERAS="${METAWORLD_CAMERAS:-corner corner2 corner3}"
 python rbs_sceneflow_scripts/replay_record_trajectories.py \
   --h5   "${H5_FILE}" \
   --json "${JSON_FILE}" \
-  --output-dir "dataset/${ENV_NAME}" \
+  --output-dir "${SAVE_DIR}/${ENV_NAME}" \
   --all-trajs --success-only \
   --random-camera --cameras ${_CAMERAS}
 

@@ -18,7 +18,7 @@
 NUM_EPISODES="${NUM_EPISODES:-10}"
 # 每个任务最多尝试采集的 episodes 数（success-only 过滤后可能更少）
 
-N_WORKERS="${N_WORKERS:-4}"
+N_WORKERS="${N_WORKERS:-48}"
 # 同时并行的任务数。
 # Metaworld 是纯 CPU（mujoco_cpu），每个任务约占 2-4 核；
 # 建议 N_WORKERS ≤ CPU核心数 / 4，避免内存/调度竞争。
@@ -26,7 +26,7 @@ N_WORKERS="${N_WORKERS:-4}"
 CAMERAS="${CAMERAS:-corner corner2 corner3}"
 # 随机摄像头池（空格分隔），传给 replay_record_trajectories.py --cameras
 
-SAVE_DIR="${SAVE_DIR:-dataset}"
+SAVE_DIR="${SAVE_DIR:-/mnt2/liangzhuowei/Metaworld/datasets}"
 # 落盘根目录（相对脚本所在位置），每个任务写入 $SAVE_DIR/<task_name>/
 
 CONDA_ENV="${CONDA_ENV:-metaworld}"
@@ -92,7 +92,13 @@ TASKS=(
 
 # ─── 路径 ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="${SCRIPT_DIR}/${SAVE_DIR}/_logs"
+if [[ "${SAVE_DIR}" = /* ]]; then
+    DATA_ROOT="${SAVE_DIR}"
+    LOG_DIR="${SAVE_DIR}/_logs"
+else
+    DATA_ROOT="${SCRIPT_DIR}/${SAVE_DIR}"
+    LOG_DIR="${SCRIPT_DIR}/${SAVE_DIR}/_logs"
+fi
 mkdir -p "${LOG_DIR}"
 
 TOTAL=${#TASKS[@]}
@@ -119,6 +125,8 @@ _run_task() {
     ENV_NAME="${env_name}" \
     NUM_EPISODES="${NUM_EPISODES}" \
     METAWORLD_CAMERAS="${CAMERAS}" \
+    SAVE_DIR="${SAVE_DIR}" \
+    MUJOCO_GL=egl \
     conda run -n "${CONDA_ENV}" --no-capture-output bash run_pipeline.sh
 }
 
@@ -202,7 +210,7 @@ if [[ "${RUN_INSPECT}" == "1" && ${#SUCCEEDED[@]} -gt 0 ]]; then
 
     INSPECT_PIDS=()
     for env_name in "${SUCCEEDED[@]}"; do
-        cam_root="${SCRIPT_DIR}/${SAVE_DIR}/${env_name}/camera_data"
+        cam_root="${DATA_ROOT}/${env_name}/camera_data"
         if [[ ! -d "${cam_root}" ]]; then
             echo "  [skip] ${env_name}: camera_data/ 不存在"
             continue
@@ -228,7 +236,7 @@ fi
 echo
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  全部完成！                                                    ║"
-printf "║  数据路径 : %-49s║\n" "${SCRIPT_DIR}/${SAVE_DIR}/"
+printf "║  数据路径 : %-49s║\n" "${DATA_ROOT}/"
 printf "║  日志路径 : %-49s║\n" "${LOG_DIR}/"
 echo "║  点云图   : 各 traj 目录下的 _sceneflow_check_ref*.png         ║"
 echo "╚══════════════════════════════════════════════════════════════╝"

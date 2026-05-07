@@ -158,3 +158,6 @@ flake.lock
 # Dataset&traj
 rollout_data/
 dataset/
+datasets/
+
+scripts/write_traj_task_json.py
