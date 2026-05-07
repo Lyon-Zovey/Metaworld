@@ -51,8 +51,12 @@ def compress_seg(
             clevel=int(clevel),
             filters=[blosc2.Filter.BITSHUFFLE],
         )
-        nd = blosc2.asarray(arr, chunks=chunks, cparams=cparams)
-        nd.save(str(out_path))
+        # blosc2.NDArray.save() is broken for some dtypes in blosc2 ≥ 4.x;
+        # passing urlpath= directly to asarray() is equivalent and works correctly.
+        if out_path.exists():
+            out_path.unlink()
+        blosc2.asarray(arr, chunks=chunks, cparams=cparams,
+                       urlpath=str(out_path), mode="w")
 
         meta = {
             "shape": list(arr.shape),

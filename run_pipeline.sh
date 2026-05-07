@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # ── 修改这两行（或通过环境变量覆盖）──────────────────────────
-ENV_NAME="${ENV_NAME:-stick-push-v3}"
+ENV_NAME="${ENV_NAME:-drawer-close-v3}"
 NUM_EPISODES="${NUM_EPISODES:-5}"
 # ────────────────────────────────────────────────────────────
 
@@ -28,11 +28,15 @@ python rbs_sceneflow_scripts/rollout_scripted_policy.py \
 
 echo ""
 echo "=== [2/7] Replay & record trajectories ==="
+# METAWORLD_CAMERAS 可由外部脚本（如 run_all_tasks_parallel.sh）传入覆盖
+_CAMERAS="${METAWORLD_CAMERAS:-corner corner2 corner3}"
+# shellcheck disable=SC2086
 python rbs_sceneflow_scripts/replay_record_trajectories.py \
   --h5   "${H5_FILE}" \
   --json "${JSON_FILE}" \
   --output-dir "dataset/${ENV_NAME}" \
-  --all-trajs --success-only
+  --all-trajs --success-only \
+  --random-camera --cameras ${_CAMERAS}
 
 echo ""
 echo "=== [3/7] Convert camera depths ==="
@@ -40,28 +44,33 @@ python rbs_sceneflow_scripts/traj2sceneflow/convert_camera_depths.py \
   "${DATASET_DIR}"
 
 echo ""
-echo "=== [4/7] Flow compress ==="
+echo "=== [4/7] Flow compress (+ delete scene_point_flow_ref*.npy) ==="
 python rbs_sceneflow_scripts/traj2sceneflow/flow_compress.py \
-  compress --out_root "${DATASET_DIR}"
+  compress --out_root "${DATASET_DIR}" --delete_npy
 
 echo ""
-echo "=== [5/7] Point compress ==="
+echo "=== [5/7] Point compress (+ delete depth_video.npy) ==="
 python rbs_sceneflow_scripts/traj2sceneflow/point_compress.py \
-  --mode compress --root "${DATASET_DIR}"
+  --mode compress --root "${DATASET_DIR}" --delete-existing
 
 echo ""
-echo "=== [6/7] Seg compress (all traj dirs) ==="
+echo "=== [6/7] Seg compress (+ delete seg.npy, all traj dirs) ==="
 for traj_dir in "${DATASET_DIR}"/traj_*/; do
   echo "  -> ${traj_dir}"
   python rbs_sceneflow_scripts/traj2sceneflow/seg_compress.py \
-    compress --seg-dir "${traj_dir}"
+    compress --seg-dir "${traj_dir}" --delete-source
 done
 
 echo ""
-echo "=== [7/7] Inspect sceneflow first frame (traj_0) ==="
+INSPECT_TRAJ_DIR="$(ls -d "${DATASET_DIR}"/traj_* 2>/dev/null | sort -V | head -n 1)"
+if [[ -z "${INSPECT_TRAJ_DIR}" ]]; then
+  echo "No trajectory directory found under ${DATASET_DIR}; skip inspect."
+  exit 0
+fi
+echo "=== [7/7] Inspect sceneflow first frame (${INSPECT_TRAJ_DIR##*/}) ==="
 conda run -n metaworld python \
   rbs_sceneflow_scripts/traj2sceneflow/inspect_sceneflow_first_frame.py \
-  --traj-dir "${DATASET_DIR}/traj_0"
+  --traj-dir "${INSPECT_TRAJ_DIR}"
 
 echo ""
 echo "========================================================="

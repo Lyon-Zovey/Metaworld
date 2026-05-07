@@ -52,6 +52,7 @@ import argparse
 import copy
 import json
 import os
+import random
 from pathlib import Path
 
 import h5py
@@ -305,6 +306,7 @@ def replay_and_record_traj(
     ep_idx:     int,
     episode:    dict,
     cam_id:     int,
+    cam_name:   str,
     cam_K:      np.ndarray,
     rgb_ren:    mujoco.Renderer,
     depth_ren:  mujoco.Renderer,
@@ -422,10 +424,14 @@ def replay_and_record_traj(
     # cam_intrinsics.npy  (3, 3) float32  (constant for fixed camera)
     np.save(str(cam_traj_dir / "cam_intrinsics.npy"), cam_K)
 
+    # camera_name.txt  – which camera was used for this trajectory
+    (cam_traj_dir / "camera_name.txt").write_text(cam_name + "\n")
+
     # ------------------------------------------------------------------ write main H5 traj group
     # Copy all datasets from input (obs, actions, rewards, env_states, …)
     in_h5f.copy(traj_key, out_h5f)
     out_grp = out_h5f[traj_key]
+    out_grp.attrs["camera_name"] = cam_name
 
     # id_poses/ group (MIKASA-compatible)
     id_grp = out_grp.create_group("id_poses", track_order=True)
@@ -461,6 +467,7 @@ def replay_and_record_traj(
     print(
         f"  traj_{ep_idx:04d}  steps={episode['elapsed_steps']:3d}"
         f"  success={episode['success']}"
+        f"  camera={cam_name}"
         f"  → {cam_traj_dir}"
     )
 
@@ -502,25 +509,35 @@ def main(args: argparse.Namespace) -> None:
     print(f"\nBuilding env  : {env_name}  (seed={seed})")
     env, mt1 = build_env(env_name, seed, args.width, args.height)
 
-    cam_id = get_camera_id(env.model, args.camera)
+    # Camera pool for (optional) per-trajectory randomisation
+    camera_pool = args.cameras  # list[str], always set by argparse default
+    if args.random_camera:
+        print(f"Camera mode   : RANDOM  pool={camera_pool}")
+    else:
+        print(f"Camera mode   : fixed={args.camera}")
+    print(f"Resolution    : {args.width}×{args.height}")
+    print(f"Trajectories  : {selected}\n")
 
-    # Optional runtime camera pose override
+    # Optional runtime camera pose override (only valid for fixed-camera mode)
     if args.cam_pos is not None:
-        cam_pos_arr = np.array(args.cam_pos, dtype=np.float64)
-        lookat_arr  = np.array(args.cam_lookat, dtype=np.float64) if args.cam_lookat else None
-        override_camera_pose(
-            env.model, cam_id,
-            pos=cam_pos_arr,
-            lookat=lookat_arr,
-            fovy_deg=args.cam_fovy,
-        )
-        print(f"Camera pose overridden: pos={args.cam_pos}  "
-              f"lookat={args.cam_lookat}  fovy={args.cam_fovy}")
-
-    cam_K = compute_intrinsics(env.model, cam_id, args.width, args.height)
+        if args.random_camera:
+            print("[WARN] --cam-pos / --cam-lookat are ignored in --random-camera mode")
+        else:
+            cam_id_override = get_camera_id(env.model, args.camera)
+            cam_pos_arr = np.array(args.cam_pos, dtype=np.float64)
+            lookat_arr  = np.array(args.cam_lookat, dtype=np.float64) if args.cam_lookat else None
+            override_camera_pose(
+                env.model, cam_id_override,
+                pos=cam_pos_arr,
+                lookat=lookat_arr,
+                fovy_deg=args.cam_fovy,
+            )
+            print(f"Camera pose overridden: pos={args.cam_pos}  "
+                  f"lookat={args.cam_lookat}  fovy={args.cam_fovy}")
 
     # Three independent mujoco.Renderer instances – all use the same no-flip
     # convention so RGB / depth / seg are spatially consistent with each other.
+    # They are camera-agnostic; cam_id is passed per render call.
     rgb_ren   = mujoco.Renderer(env.model, height=args.height, width=args.width)
 
     depth_ren = mujoco.Renderer(env.model, height=args.height, width=args.width)
@@ -529,17 +546,17 @@ def main(args: argparse.Namespace) -> None:
     seg_ren = mujoco.Renderer(env.model, height=args.height, width=args.width)
     seg_ren.enable_segmentation_rendering()
 
-    print(f"Camera        : {args.camera}  (id={cam_id})")
-    print(f"Resolution    : {args.width}×{args.height}")
-    print(f"Trajectories  : {selected}\n")
-
     # Output JSON (copy + update obs_mode)
     out_json = copy.deepcopy(json_data)
     out_json["env_info"]["env_kwargs"]["obs_mode"] = OUT_OBS_MODE
+    camera_desc = "random:" + "+".join(camera_pool) if args.random_camera else args.camera
     out_json["source_desc"] = (
         f"Metaworld scripted policy replay+record "
-        f"(env={env_name}, seed={seed}, camera={args.camera})"
+        f"(env={env_name}, seed={seed}, camera={camera_desc})"
     )
+
+    # Track per-trajectory camera assignment so we can embed it in the JSON
+    cam_name_per_traj: dict[int, str] = {}
 
     # Process trajectories
     with (
@@ -547,6 +564,16 @@ def main(args: argparse.Namespace) -> None:
         h5py.File(str(out_h5_path),  "w") as out_h5f,
     ):
         for ep_idx in selected:
+            # --- per-trajectory camera selection ---
+            if args.random_camera:
+                cam_name = random.choice(camera_pool)
+            else:
+                cam_name = args.camera
+            cam_name_per_traj[ep_idx] = cam_name
+
+            cam_id = get_camera_id(env.model, cam_name)
+            cam_K  = compute_intrinsics(env.model, cam_id, args.width, args.height)
+
             replay_and_record_traj(
                 env=env,
                 mt1=mt1,
@@ -555,6 +582,7 @@ def main(args: argparse.Namespace) -> None:
                 ep_idx=ep_idx,
                 episode=episodes[ep_idx],
                 cam_id=cam_id,
+                cam_name=cam_name,
                 cam_K=cam_K,
                 rgb_ren=rgb_ren,
                 depth_ren=depth_ren,
@@ -563,9 +591,13 @@ def main(args: argparse.Namespace) -> None:
                 fps=args.fps,
             )
 
-    # Write output JSON
-    # Keep only processed episodes in the JSON
-    out_json["episodes"] = [episodes[i] for i in selected]
+    # Write output JSON – embed the chosen camera name into each episode record
+    out_episodes = []
+    for i in selected:
+        ep = dict(episodes[i])
+        ep["camera"] = cam_name_per_traj[i]
+        out_episodes.append(ep)
+    out_json["episodes"] = out_episodes
     with open(str(out_json_path), "w") as f:
         json.dump(out_json, f, indent=2)
 
@@ -608,8 +640,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--fps",    type=float, default=30.0, help="FPS for rgb.mp4.")
     p.add_argument("--camera", type=str,   default="corner",
-                   help="MuJoCo camera name to use as base: corner | topview | "
-                        "corner2 | corner3 | corner4")
+                   help="MuJoCo camera name (used when --random-camera is NOT set): "
+                        "corner | topview | corner2 | corner3 | corner4")
+    p.add_argument(
+        "--random-camera", action="store_true",
+        help="Randomly pick a camera from --cameras for each trajectory independently.",
+    )
+    p.add_argument(
+        "--cameras", type=str, nargs="+",
+        default=["corner", "corner2", "corner3"],
+        metavar="CAM",
+        help="Camera pool used with --random-camera. "
+             "Default: corner corner2 corner3",
+    )
     p.add_argument("--width",  type=int,   default=640)
     p.add_argument("--height", type=int,   default=480)
 
