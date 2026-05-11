@@ -113,7 +113,11 @@ def _tiled_rgb_to_rgba(tiled: np.ndarray, orig_w: int) -> np.ndarray:
 def _encode(frames: np.ndarray, path: str, codec: str, pix_fmt: str,
             crf: Optional[int], native_alpha: bool, bits: int,
             preset: str = "ultrafast", threads: int = 4):
-    """Encode frames to video file via ffmpeg pipe."""
+    """Encode frames to video file via ffmpeg pipe.
+
+    For libx265, tries hevc_nvenc (GPU) first; falls back to libx265 (CPU)
+    automatically if NVENC is unavailable.
+    """
     T, H, W, C = frames.shape
     if bits == 10:
         feed = (frames.astype(np.uint16) * 64).tobytes()  # left-shift to 16-bit
@@ -122,24 +126,44 @@ def _encode(frames: np.ndarray, path: str, codec: str, pix_fmt: str,
         feed = frames.tobytes()
         in_fmt = "rgba" if (native_alpha and C == 4) else "rgb24"
 
-    cmd = ["ffmpeg", "-y", "-loglevel", "error",
-           "-f", "rawvideo", "-pix_fmt", in_fmt,
-           "-s", f"{W}x{H}", "-r", "1", "-i", "pipe:0"]
-    if codec == "ffv1":
-        cmd += ["-c:v", "ffv1", "-level", "3", "-pix_fmt", pix_fmt]
-    elif codec == "libx265":
-        cmd += ["-c:v", "libx265", "-preset", preset,
-                "-x265-params", f"pools={threads}:frame-threads=1",
-                "-crf", str(crf), "-pix_fmt", pix_fmt, "-tag:v", "hvc1"]
-    elif codec == "libvpx-vp9":
-        cmd += ["-c:v", "libvpx-vp9", "-crf", str(crf), "-b:v", "0",
-                "-pix_fmt", pix_fmt, "-row-mt", "1"]
-    cmd.append(path)
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    _, err = p.communicate(input=feed)
-    if p.returncode != 0:
-        raise RuntimeError(f"ffmpeg encode failed ({codec}): {err.decode()}")
+    def _build_cmd(use_codec: str) -> list:
+        cmd = ["ffmpeg", "-y", "-loglevel", "error",
+               "-f", "rawvideo", "-pix_fmt", in_fmt,
+               "-s", f"{W}x{H}", "-r", "1", "-i", "pipe:0"]
+        if use_codec == "ffv1":
+            cmd += ["-c:v", "ffv1", "-level", "3", "-pix_fmt", pix_fmt]
+        elif use_codec == "hevc_nvenc":
+            # GPU: hevc_nvenc with near-lossless quality (constqp qp=0 ≈ lossless)
+            cmd += ["-c:v", "hevc_nvenc", "-preset", "p4",
+                    "-rc", "constqp", "-qp", str(crf if crf is not None else 0),
+                    "-pix_fmt", pix_fmt, "-tag:v", "hvc1"]
+        elif use_codec == "libx265":
+            cmd += ["-c:v", "libx265", "-preset", preset,
+                    "-x265-params", f"pools={threads}:frame-threads=1",
+                    "-crf", str(crf), "-pix_fmt", pix_fmt, "-tag:v", "hvc1"]
+        elif use_codec == "libvpx-vp9":
+            cmd += ["-c:v", "libvpx-vp9", "-crf", str(crf), "-b:v", "0",
+                    "-pix_fmt", pix_fmt, "-row-mt", "1"]
+        cmd.append(path)
+        return cmd
+
+    def _run(use_codec: str) -> tuple[int, bytes]:
+        p = subprocess.Popen(_build_cmd(use_codec), stdin=subprocess.PIPE,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        _, err = p.communicate(input=feed)
+        return p.returncode, err
+
+    # For libx265: try NVENC GPU first, fall back to CPU
+    if codec == "libx265":
+        rc, err = _run("hevc_nvenc")
+        if rc != 0:
+            rc, err = _run("libx265")
+            if rc != 0:
+                raise RuntimeError(f"ffmpeg encode failed (hevc_nvenc+libx265): {err.decode()}")
+    else:
+        rc, err = _run(codec)
+        if rc != 0:
+            raise RuntimeError(f"ffmpeg encode failed ({codec}): {err.decode()}")
 
 
 def _decode(path: str, native_alpha: bool, bits: int) -> np.ndarray:

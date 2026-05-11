@@ -53,6 +53,7 @@ import copy
 import json
 import os
 import random
+import sys
 from pathlib import Path
 
 import h5py
@@ -283,15 +284,34 @@ def render_seg_body_ids(renderer: mujoco.Renderer, data, cam_id: int,
 
 
 def save_rgb_video(frames: list[np.ndarray], path: str, fps: float) -> None:
-    """Save list of (H,W,3) uint8 frames as MP4."""
-    try:
-        import imageio.v3 as iio
-        iio.imwrite(path, np.stack(frames, axis=0), fps=int(fps))
-    except ImportError:
-        import imageio
-        with imageio.get_writer(path, fps=int(fps)) as w:
-            for f in frames:
-                w.append_data(f)
+    """Save list of (H,W,3) uint8 frames as MP4.
+
+    Tries h264_nvenc (GPU) first, falls back to libx264 (CPU) if unavailable.
+    """
+    import subprocess as _sp
+    frames_arr = np.stack(frames, axis=0)  # (T,H,W,3) uint8
+    T, H, W, _ = frames_arr.shape
+
+    def _ffmpeg_encode(codec: str) -> bool:
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", f"{W}x{H}", "-r", str(int(fps)), "-i", "pipe:0",
+            "-c:v", codec,
+        ]
+        if codec == "h264_nvenc":
+            cmd += ["-preset", "p4", "-rc", "constqp", "-qp", "18", "-pix_fmt", "yuv420p"]
+        else:
+            cmd += ["-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p"]
+        cmd.append(path)
+        p = _sp.Popen(cmd, stdin=_sp.PIPE, stdout=_sp.DEVNULL, stderr=_sp.PIPE)
+        _, err = p.communicate(input=frames_arr.tobytes())
+        return p.returncode == 0
+
+    if not _ffmpeg_encode("h264_nvenc"):
+        ok = _ffmpeg_encode("libx264")
+        if not ok:
+            raise RuntimeError(f"ffmpeg encode failed for both h264_nvenc and libx264")
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +333,7 @@ def replay_and_record_traj(
     seg_ren:    mujoco.Renderer,
     cam_data_root: Path,
     fps:        float,
+    env_name:   str = "",
 ) -> None:
     """
     Replay one trajectory from env_states, recording camera data and id_poses.
@@ -427,6 +448,24 @@ def replay_and_record_traj(
     # camera_name.txt  – which camera was used for this trajectory
     (cam_traj_dir / "camera_name.txt").write_text(cam_name + "\n")
 
+    # traj_task.json  – task metadata for downstream consumers
+    traj_task = {
+        "task_id":   env_name,
+        "traj_name": traj_key,
+        "actors": [
+            {"seg_id": bid, "name": f"body:{env.model.body(bid).name}"}
+            for bid in body_ids_tracked
+            if not env.model.body(bid).name.startswith("link:")
+        ],
+        "links": [
+            {"seg_id": bid, "name": f"link:{env.model.body(bid).name}"}
+            for bid in body_ids_tracked
+            if env.model.body(bid).name.startswith("link:")
+        ],
+    }
+    with open(str(cam_traj_dir / "traj_task.json"), "w", encoding="utf-8") as _jf:
+        json.dump(traj_task, _jf, ensure_ascii=False, indent=2)
+
     # ------------------------------------------------------------------ write main H5 traj group
     # Copy all datasets from input (obs, actions, rewards, env_states, …)
     in_h5f.copy(traj_key, out_h5f)
@@ -473,6 +512,144 @@ def replay_and_record_traj(
 
 
 # ---------------------------------------------------------------------------
+# Parallel helpers (used when --num-procs > 1)
+# ---------------------------------------------------------------------------
+
+def _build_worker_cmd(
+    args: argparse.Namespace, worker_id: int, w_start: int, w_end: int
+) -> list[str]:
+    """Build the subprocess argv list for one worker process."""
+    cmd = [
+        sys.executable, str(Path(__file__).resolve()),
+        "--h5",          args.h5,
+        "--json",        args.json,
+        "--output-dir",  args.output_dir,
+        "--fps",         str(args.fps),
+        "--width",       str(args.width),
+        "--height",      str(args.height),
+        "--num-procs",   "1",
+        "--_worker-id",    str(worker_id),
+        "--_worker-start", str(w_start),
+        "--_worker-end",   str(w_end),
+    ]
+    if args.all_trajs:
+        cmd.append("--all-trajs")
+    else:
+        cmd += ["--traj-id", str(args.traj_id)]
+    if args.success_only:
+        cmd.append("--success-only")
+    if args.random_camera:
+        cmd.append("--random-camera")
+        cmd += ["--cameras"] + args.cameras
+    else:
+        cmd += ["--camera", args.camera]
+    if args.cam_pos is not None:
+        cmd += ["--cam-pos"] + [str(v) for v in args.cam_pos]
+    if args.cam_lookat is not None:
+        cmd += ["--cam-lookat"] + [str(v) for v in args.cam_lookat]
+    if args.cam_fovy is not None:
+        cmd += ["--cam-fovy", str(args.cam_fovy)]
+    return cmd
+
+
+def _spawn_workers(args: argparse.Namespace, selected: list[int]) -> None:
+    """Split *selected* across args.num_procs workers and merge outputs.
+
+    Each worker writes:
+      * _tmp_worker_K.h5          – its traj groups
+      * _tmp_worker_K_eps.json    – its episode list
+      * camera_data/traj_N/…      – shared dir, no conflict (different N per worker)
+    This function merges the H5 and episode lists into the final outputs.
+    """
+    import math
+    import subprocess
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if len(selected) == 0:
+        raise RuntimeError("No trajectories selected for replay")
+
+    n = min(args.num_procs, len(selected))
+    chunk = math.ceil(len(selected) / n)
+    slices = [
+        (i * chunk, min((i + 1) * chunk, len(selected)))
+        for i in range(n) if i * chunk < len(selected)
+    ]
+
+    print(f"\n[parallel] {len(selected)} trajs  →  {len(slices)} workers")
+
+    procs: list[tuple[int, subprocess.Popen]] = []
+    log_handles = []
+    for k, (ws, we) in enumerate(slices):
+        cmd = _build_worker_cmd(args, k, ws, we)
+        log_path = out_dir / f"_tmp_worker_{k}.log"
+        lf = open(str(log_path), "w")
+        print(f"  worker {k}: selected[{ws}:{we}] ({we - ws} trajs)  log={log_path.name}")
+        p = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT)
+        procs.append((k, p))
+        log_handles.append(lf)
+
+    print()
+    failed = []
+    for (k, p), lf in zip(procs, log_handles):
+        rc = p.wait()
+        lf.close()
+        if rc != 0:
+            failed.append(k)
+            print(f"  [ERROR] worker {k} exited {rc}  → {out_dir / f'_tmp_worker_{k}.log'}")
+        else:
+            print(f"  [OK]    worker {k}")
+
+    if failed:
+        raise RuntimeError(f"Worker(s) {failed} failed; check _tmp_worker_K.log")
+
+    # ── Merge H5 ────────────────────────────────────────────────────────────
+    out_h5_path = out_dir / f"{OUT_BASENAME}.h5"
+    print(f"\n[merge] H5  → {out_h5_path}")
+    with h5py.File(str(out_h5_path), "w") as dst:
+        for k, _ in enumerate(slices):
+            tmp_h5 = out_dir / f"_tmp_worker_{k}.h5"
+            with h5py.File(str(tmp_h5), "r") as src:
+                for key in sorted(src.keys()):   # traj_0, traj_1, …
+                    src.copy(key, dst)
+            tmp_h5.unlink()
+
+    # ── Merge JSON episodes ─────────────────────────────────────────────────
+    all_episodes: list[dict] = []
+    for k, _ in enumerate(slices):
+        tmp_eps = out_dir / f"_tmp_worker_{k}_eps.json"
+        with open(str(tmp_eps)) as f:
+            all_episodes.extend(json.load(f))
+        tmp_eps.unlink()
+
+    json_data  = load_json(args.json)
+    env_info   = json_data["env_info"]
+    out_json   = copy.deepcopy(json_data)
+    out_json["env_info"]["env_kwargs"]["obs_mode"] = OUT_OBS_MODE
+    cam_desc   = ("random:" + "+".join(args.cameras)) if args.random_camera else args.camera
+    out_json["source_desc"] = (
+        f"Metaworld scripted policy replay+record "
+        f"(env={env_info['env_id']}, camera={cam_desc})"
+    )
+    out_json["episodes"] = all_episodes
+    out_json_path = out_dir / f"{OUT_BASENAME}.json"
+    with open(str(out_json_path), "w") as f:
+        json.dump(out_json, f, indent=2)
+    print(f"[merge] JSON → {out_json_path}")
+
+    # ── Clean up worker logs (empty on success) ─────────────────────────────
+    for k, _ in enumerate(slices):
+        lp = out_dir / f"_tmp_worker_{k}.log"
+        if lp.exists():
+            lp.unlink()
+
+    print(f"\nOutput H5   : {out_h5_path}")
+    print(f"Output JSON : {out_json_path}")
+    print(f"Camera data : {out_dir / 'camera_data'}")
+    print("\nDone.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -497,12 +674,22 @@ def main(args: argparse.Namespace) -> None:
         print("No trajectories to process. Exiting.")
         return
 
+    # ── Parallel dispatch / worker slice ────────────────────────────────────
+    if args.num_procs > 1 and args._worker_id is None:
+        _spawn_workers(args, selected)
+        return
+    if args._worker_id is not None:
+        selected = selected[args._worker_start : args._worker_end]
+
     # Output paths
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cam_data_root = out_dir / "camera_data"
     cam_data_root.mkdir(exist_ok=True)
-    out_h5_path   = out_dir / f"{OUT_BASENAME}.h5"
+    if args._worker_id is not None:
+        out_h5_path = out_dir / f"_tmp_worker_{args._worker_id}.h5"
+    else:
+        out_h5_path = out_dir / f"{OUT_BASENAME}.h5"
     out_json_path = out_dir / f"{OUT_BASENAME}.json"
 
     # Build env + aux renderers
@@ -589,6 +776,7 @@ def main(args: argparse.Namespace) -> None:
                 seg_ren=seg_ren,
                 cam_data_root=cam_data_root,
                 fps=args.fps,
+                env_name=env_name,
             )
 
     # Write output JSON – embed the chosen camera name into each episode record
@@ -597,9 +785,15 @@ def main(args: argparse.Namespace) -> None:
         ep = dict(episodes[i])
         ep["camera"] = cam_name_per_traj[i]
         out_episodes.append(ep)
-    out_json["episodes"] = out_episodes
-    with open(str(out_json_path), "w") as f:
-        json.dump(out_json, f, indent=2)
+    if args._worker_id is not None:
+        # Worker mode: write only the episodes list; orchestrator merges.
+        tmp_eps = out_dir / f"_tmp_worker_{args._worker_id}_eps.json"
+        with open(str(tmp_eps), "w") as f:
+            json.dump(out_episodes, f, indent=2)
+    else:
+        out_json["episodes"] = out_episodes
+        with open(str(out_json_path), "w") as f:
+            json.dump(out_json, f, indent=2)
 
     rgb_ren.close()
     depth_ren.close()
@@ -677,6 +871,17 @@ def parse_args() -> argparse.Namespace:
         "--cam-fovy", type=float, default=None,
         help="Override vertical field-of-view in degrees (default: use XML value).",
     )
+
+    # ---- parallel replay ------------------------------------------------
+    p.add_argument(
+        "--num-procs", type=int, default=1,
+        help="Parallel worker sub-processes for trajectory replay (default: 1).",
+    )
+    # Internal args used by _spawn_workers(); not for direct invocation.
+    p.add_argument("--_worker-id",    type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_worker-start", type=int, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--_worker-end",   type=int, default=None, help=argparse.SUPPRESS)
+
     return p.parse_args()
 
 

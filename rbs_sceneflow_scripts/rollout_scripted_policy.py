@@ -141,7 +141,7 @@ def rollout_single_env(
     stop_on_success: bool = True,
 ) -> list[dict]:
     """
-    Run `num_episodes` rollouts of the scripted policy for `env_name`.
+    Collect `num_episodes` successful rollouts of the scripted policy for `env_name`.
     Returns a list of trajectory dicts with raw numpy arrays and JSON scalars.
     """
     if env_name not in ENV_POLICY_MAP:
@@ -159,8 +159,9 @@ def rollout_single_env(
     tasks = mt1.train_tasks
     trajectories = []
 
-    for ep_idx in range(num_episodes):
-        task_idx = ep_idx % len(tasks)
+    attempt_idx = 0
+    while len(trajectories) < num_episodes:
+        task_idx = attempt_idx % len(tasks)
         env.set_task(tasks[task_idx])
         obs, _ = env.reset()
 
@@ -208,25 +209,28 @@ def rollout_single_env(
         # Stack obs list into nested dict of arrays
         obs_stacked = stack_nested(obs_buf)  # dict of (T+1, ...) arrays
 
-        trajectories.append(
-            {
-                # JSON scalars
-                "episode_seed": seed + ep_idx,
-                "task_idx":     task_idx,
-                "elapsed_steps": t,
-                "success":      ep_success,
-                # H5 arrays
-                "obs":          obs_stacked,                                    # nested dict
-                "actions":      np.stack(action_buf, axis=0),                  # (T, 4)
-                "rewards":      np.array(reward_buf,     dtype=np.float32),    # (T,)
-                "terminated":   np.array(terminated_buf, dtype=bool),          # (T,)
-                "truncated":    np.array(truncated_buf,  dtype=bool),          # (T,)
-                "success_seq":  np.array(success_buf,    dtype=bool),          # (T,)
-                "qpos":         np.stack(qpos_buf,       axis=0),              # (T+1, Dq)
-                "qvel":         np.stack(qvel_buf,       axis=0),              # (T+1, Dv)
-                "target_pos":   np.stack(target_buf,     axis=0),              # (T+1, 3)
-            }
-        )
+        if ep_success:
+            trajectories.append(
+                {
+                    # JSON scalars
+                    "episode_seed": seed + attempt_idx,
+                    "task_idx":     task_idx,
+                    "elapsed_steps": t,
+                    "success":      ep_success,
+                    # H5 arrays
+                    "obs":          obs_stacked,                                    # nested dict
+                    "actions":      np.stack(action_buf, axis=0),                  # (T, 4)
+                    "rewards":      np.array(reward_buf,     dtype=np.float32),    # (T,)
+                    "terminated":   np.array(terminated_buf, dtype=bool),          # (T,)
+                    "truncated":    np.array(truncated_buf,  dtype=bool),          # (T,)
+                    "success_seq":  np.array(success_buf,    dtype=bool),          # (T,)
+                    "qpos":         np.stack(qpos_buf,       axis=0),              # (T+1, Dq)
+                    "qvel":         np.stack(qvel_buf,       axis=0),              # (T+1, Dv)
+                    "target_pos":   np.stack(target_buf,     axis=0),              # (T+1, 3)
+                }
+            )
+
+        attempt_idx += 1
 
     env.close()
     return trajectories
@@ -306,12 +310,10 @@ def save_trajectories(
     with open(json_path, "w") as f:
         json.dump(json_data, f, indent=2)
 
-    n_success = sum(t["success"] for t in trajectories)
-    n_total   = len(trajectories)
-    print(f"  Saved {n_total} episodes → {output_dir}")
+    n_total = len(trajectories)
+    print(f"  Saved {n_total} successful episodes → {output_dir}")
     print(f"  H5:   {h5_path}")
     print(f"  JSON: {json_path}")
-    print(f"  Success rate: {n_success}/{n_total}  ({100*n_success/n_total:.1f}%)")
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +357,7 @@ def main() -> None:
     for env_name in env_names:
         print(f"\n{'='*55}")
         print(f"  env : {env_name}")
-        print(f"  eps : {args.num_episodes}   seed : {args.seed}")
+        print(f"  target successful eps : {args.num_episodes}   seed : {args.seed}")
         print(f"{'='*55}")
 
         trajs = rollout_single_env(

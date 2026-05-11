@@ -31,13 +31,21 @@ echo ""
 echo "=== [2/7] Replay & record trajectories ==="
 # METAWORLD_CAMERAS 可由外部脚本（如 run_all_tasks_parallel.sh）传入覆盖
 _CAMERAS="${METAWORLD_CAMERAS:-corner corner2 corner3}"
+_REPLAY_PROCS="${REPLAY_PROCS:-1}"
+REPLAY_FPS="${REPLAY_FPS:-16}"
+REPLAY_WIDTH="${REPLAY_WIDTH:-832}"
+REPLAY_HEIGHT="${REPLAY_HEIGHT:-480}"
 # shellcheck disable=SC2086
 python rbs_sceneflow_scripts/replay_record_trajectories.py \
   --h5   "${H5_FILE}" \
   --json "${JSON_FILE}" \
   --output-dir "${SAVE_DIR}/${ENV_NAME}" \
   --all-trajs --success-only \
-  --random-camera --cameras ${_CAMERAS}
+  --random-camera --cameras ${_CAMERAS} \
+  --num-procs "${_REPLAY_PROCS}" \
+  --fps "${REPLAY_FPS}" \
+  --width "${REPLAY_WIDTH}" \
+  --height "${REPLAY_HEIGHT}"
 
 echo ""
 echo "=== [3/7] Convert camera depths ==="
@@ -63,13 +71,17 @@ for traj_dir in "${DATASET_DIR}"/traj_*/; do
 done
 
 echo ""
-INSPECT_TRAJ_DIR="$(ls -d "${DATASET_DIR}"/traj_* 2>/dev/null | sort -V | head -n 1)"
+shopt -s nullglob
+TRAJ_DIRS=("${DATASET_DIR}"/traj_*/)
+shopt -u nullglob
+INSPECT_TRAJ_DIR="${TRAJ_DIRS[0]:-}"
 if [[ -z "${INSPECT_TRAJ_DIR}" ]]; then
   echo "No trajectory directory found under ${DATASET_DIR}; skip inspect."
   exit 0
 fi
+INSPECT_TRAJ_DIR="${INSPECT_TRAJ_DIR%/}"
 echo "=== [7/7] Inspect sceneflow first frame (${INSPECT_TRAJ_DIR##*/}) ==="
-conda run -n metaworld python \
+/mnt2/liangzhuowei/miniconda3/bin/conda run -n metaworld python \
   rbs_sceneflow_scripts/traj2sceneflow/inspect_sceneflow_first_frame.py \
   --traj-dir "${INSPECT_TRAJ_DIR}"
 

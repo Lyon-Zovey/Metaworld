@@ -15,18 +15,27 @@
 # ║                          可 调 参 数  ← 直接改这里                         ║
 # ╠══════════════════════════════════════════════════════════════════════════╣
 
-NUM_EPISODES="${NUM_EPISODES:-10}"
+NUM_EPISODES="${NUM_EPISODES:-500}"
 # 每个任务最多尝试采集的 episodes 数（success-only 过滤后可能更少）
 
-N_WORKERS="${N_WORKERS:-48}"
+N_WORKERS="${N_WORKERS:-24}"
 # 同时并行的任务数。
 # Metaworld 是纯 CPU（mujoco_cpu），每个任务约占 2-4 核；
 # 建议 N_WORKERS ≤ CPU核心数 / 4，避免内存/调度竞争。
 
+REPLAY_PROCS="${REPLAY_PROCS:-2}"
+# replay_record_trajectories.py 内部的并行进程数（每个任务内拆分轨迹并行）。
+# 总占核 ≈ N_WORKERS × REPLAY_PROCS；建议乘积 ≤ CPU 核心数。
+
+REPLAY_FPS="${REPLAY_FPS:-16}"
+REPLAY_WIDTH="${REPLAY_WIDTH:-832}"
+REPLAY_HEIGHT="${REPLAY_HEIGHT:-480}"
+# 回放录像参数，需与下游训练数据规范一致。
+
 CAMERAS="${CAMERAS:-corner corner2 corner3}"
 # 随机摄像头池（空格分隔），传给 replay_record_trajectories.py --cameras
 
-SAVE_DIR="${SAVE_DIR:-/mnt2/liangzhuowei/Metaworld/datasets}"
+SAVE_DIR="${SAVE_DIR:-/mnt2/liangzhuowei/Metaworld/datasets_500}"
 # 落盘根目录（相对脚本所在位置），每个任务写入 $SAVE_DIR/<task_name>/
 
 CONDA_ENV="${CONDA_ENV:-metaworld}"
@@ -111,6 +120,9 @@ echo "╠═══════════════════════�
 printf "║  tasks    : %-48s║\n" "${TOTAL}"
 printf "║  episodes : %-48s║\n" "${NUM_EPISODES}"
 printf "║  workers  : %-48s║\n" "${N_WORKERS}"
+printf "║  replay-procs: %-45s║\n" "${REPLAY_PROCS}"
+printf "║  replay-fps: %-47s║\n" "${REPLAY_FPS}"
+printf "║  replay-res: %-47s║\n" "${REPLAY_WIDTH}x${REPLAY_HEIGHT}"
 printf "║  cameras  : %-48s║\n" "${CAMERAS}"
 printf "║  save_dir : %-48s║\n" "${SAVE_DIR}"
 printf "║  logs     : %-48s║\n" "${LOG_DIR}"
@@ -126,8 +138,12 @@ _run_task() {
     NUM_EPISODES="${NUM_EPISODES}" \
     METAWORLD_CAMERAS="${CAMERAS}" \
     SAVE_DIR="${SAVE_DIR}" \
+    REPLAY_PROCS="${REPLAY_PROCS}" \
+    REPLAY_FPS="${REPLAY_FPS}" \
+    REPLAY_WIDTH="${REPLAY_WIDTH}" \
+    REPLAY_HEIGHT="${REPLAY_HEIGHT}" \
     MUJOCO_GL=egl \
-    conda run -n "${CONDA_ENV}" --no-capture-output bash run_pipeline.sh
+    /mnt2/liangzhuowei/miniconda3/bin/conda run -n "${CONDA_ENV}" --no-capture-output bash run_pipeline.sh
 }
 
 # ─── 并行调度：N_WORKERS 槽位 ─────────────────────────────────────────────
