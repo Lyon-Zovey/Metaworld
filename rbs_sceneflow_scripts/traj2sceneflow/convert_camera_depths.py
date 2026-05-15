@@ -36,7 +36,8 @@ def depth_to_camera_points(
     cx = float(K[0, 2])
     cy = float(K[1, 2])
     x = (uu - cx) * z_m / fx
-    y = (cy - vv) * z_m / fy
+    # render_depth applies [::-1] so row-0 = camera -y; y increases with v
+    y = (vv - cy) * z_m / fy
     z_cam = -z_m
     return np.stack([x, y, z_cam], axis=1), valid
 
@@ -406,7 +407,23 @@ def main():
         print(f"Done. Saved {n} files.")
         return
 
-    folders = [str(p) for p in sorted(root.iterdir()) if p.is_dir()]
+    # Collect leaf directories that contain depth_video.npy.
+    # Supports two layouts:
+    #   flat:   camera_data/traj_N/depth_video.npy
+    #   nested: camera_data/traj_N/<cam_name>/depth_video.npy  (multi-camera)
+    folders: list[str] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        if (child / "depth_video.npy").exists():
+            # flat single-camera layout
+            folders.append(str(child))
+        else:
+            # nested multi-camera layout: one level deeper
+            for subchild in sorted(child.iterdir()):
+                if subchild.is_dir() and (subchild / "depth_video.npy").exists():
+                    folders.append(str(subchild))
+
     total = 0
 
     if args.workers <= 1:

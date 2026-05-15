@@ -15,15 +15,15 @@
 # ║                          可 调 参 数  ← 直接改这里                         ║
 # ╠══════════════════════════════════════════════════════════════════════════╣
 
-NUM_EPISODES="${NUM_EPISODES:-50}"
+NUM_EPISODES="${NUM_EPISODES:-1}"
 # 每个任务最多尝试采集的 episodes 数（success-only 过滤后可能更少）
 
-N_WORKERS="${N_WORKERS:-24}"
+N_WORKERS="${N_WORKERS:-1}"
 # 同时并行的任务数。
 # Metaworld 是纯 CPU（mujoco_cpu），每个任务约占 2-4 核；
 # 建议 N_WORKERS ≤ CPU核心数 / 4，避免内存/调度竞争。
 
-REPLAY_PROCS="${REPLAY_PROCS:-2}"
+REPLAY_PROCS="${REPLAY_PROCS:-1}"
 # replay_record_trajectories.py 内部的并行进程数（每个任务内拆分轨迹并行）。
 # 总占核 ≈ N_WORKERS × REPLAY_PROCS；建议乘积 ≤ CPU 核心数。
 
@@ -35,8 +35,11 @@ REPLAY_HEIGHT="${REPLAY_HEIGHT:-480}"
 CAMERAS="${CAMERAS:-corner corner2 corner3}"
 # 随机摄像头池（空格分隔），传给 replay_record_trajectories.py --cameras
 
-SAVE_DIR="${SAVE_DIR:-/mnt2/liangzhuowei/Metaworld/datasets_500_fixed}"
+SAVE_DIR="${SAVE_DIR:-/mnt2/liangzhuowei/Metaworld/datasets_500_fixed_test}"
 # 落盘根目录（相对脚本所在位置），每个任务写入 $SAVE_DIR/<task_name>/
+
+ROLLOUT_DIR="${ROLLOUT_DIR:-/mnt2/liangzhuowei/Metaworld/rollout_test}"
+# rollout 中间数据根目录，每个任务写入 $ROLLOUT_DIR/<task_name>/，互不冲突
 
 CONDA_ENV="${CONDA_ENV:-metaworld}"
 # conda 环境名
@@ -50,51 +53,6 @@ TASKS=(
     "bin-picking-v3"
     "box-close-v3"
     "button-press-topdown-v3"
-    "button-press-topdown-wall-v3"
-    "button-press-v3"
-    "button-press-wall-v3"
-    "coffee-button-v3"
-    "coffee-pull-v3"
-    "coffee-push-v3"
-    "dial-turn-v3"
-    "disassemble-v3"
-    "door-close-v3"
-    "door-lock-v3"
-    "door-open-v3"
-    "door-unlock-v3"
-    "hand-insert-v3"
-    "drawer-close-v3"
-    "drawer-open-v3"
-    "faucet-open-v3"
-    "faucet-close-v3"
-    "hammer-v3"
-    "handle-press-side-v3"
-    "handle-press-v3"
-    "handle-pull-side-v3"
-    "handle-pull-v3"
-    "lever-pull-v3"
-    "pick-place-wall-v3"
-    "pick-out-of-hole-v3"
-    "pick-place-v3"
-    "plate-slide-v3"
-    "plate-slide-side-v3"
-    "plate-slide-back-v3"
-    "plate-slide-back-side-v3"
-    "peg-insert-side-v3"
-    "peg-unplug-side-v3"
-    "soccer-v3"
-    "stick-push-v3"
-    "stick-pull-v3"
-    "push-v3"
-    "push-wall-v3"
-    "push-back-v3"
-    "reach-v3"
-    "reach-wall-v3"
-    "shelf-place-v3"
-    "sweep-into-v3"
-    "sweep-v3"
-    "window-open-v3"
-    "window-close-v3"
 )
 
 # ╚══════════════════════════════════════════════════════════════════════════╝
@@ -125,6 +83,7 @@ printf "║  replay-fps: %-47s║\n" "${REPLAY_FPS}"
 printf "║  replay-res: %-47s║\n" "${REPLAY_WIDTH}x${REPLAY_HEIGHT}"
 printf "║  cameras  : %-48s║\n" "${CAMERAS}"
 printf "║  save_dir : %-48s║\n" "${SAVE_DIR}"
+printf "║  rollout  : %-48s║\n" "${ROLLOUT_DIR}"
 printf "║  logs     : %-48s║\n" "${LOG_DIR}"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo
@@ -138,6 +97,7 @@ _run_task() {
     NUM_EPISODES="${NUM_EPISODES}" \
     METAWORLD_CAMERAS="${CAMERAS}" \
     SAVE_DIR="${SAVE_DIR}" \
+    ROLLOUT_DIR="${ROLLOUT_DIR}" \
     REPLAY_PROCS="${REPLAY_PROCS}" \
     REPLAY_FPS="${REPLAY_FPS}" \
     REPLAY_WIDTH="${REPLAY_WIDTH}" \

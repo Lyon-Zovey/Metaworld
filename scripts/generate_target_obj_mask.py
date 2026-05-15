@@ -6,14 +6,14 @@ For each task under <dataset_root>:
         traj_task.json (or meta.json) # actors = [{seg_id, name}]
         rgb.mp4                       # reference video (to match size/fps)
     -> writes:
-        target_obj_mask.mp4           # (T, H, W) strict binary {0,255} grayscale H.264 (lossless yuv444p)
+        mask_<obj>.npz                # (T, H, W) uint8 strict binary {0,255}
         meta.json (renamed from traj_task.json if present), with two new fields:
             "target_object": {"body_names": [...], "seg_ids": [...]}
             "target_obj_mask": {
-                "file": "target_obj_mask.mp4",
-                "format": "h264_lossless_yuv444p",
+                "file": "mask_<obj>.npz",
+                "format": "npz_uint8_binary",
                 "binary_values": [0, 255],
-                "fps": <float>, "num_frames": <int>, "height": <int>, "width": <int>
+                "num_frames": <int>, "height": <int>, "width": <int>
             }
 
 Mapping from task -> target body names is read from a separate JSON
@@ -38,80 +38,18 @@ import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+import re
 
 import blosc2
-import imageio_ffmpeg
 import numpy as np
+_SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
-FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-FFPROBE = "ffprobe"
-
-
-def read_rgb_fps(rgb_mp4: Path) -> float:
-    """Read frame rate via ffprobe; falls back to 20.0 only if parsing fails."""
-    proc = subprocess.run(
-        [
-            FFPROBE, "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=r_frame_rate",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(rgb_mp4),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    rate = (proc.stdout or "").strip()
-    if "/" in rate:
-        num, den = rate.split("/", 1)
-        try:
-            n, d = float(num), float(den)
-            if d > 0 and n > 0:
-                return n / d
-        except ValueError:
-            pass
-    try:
-        v = float(rate)
-        if v > 0:
-            return v
-    except ValueError:
-        pass
-    return 20.0
-
-
-def write_gray_mp4(frames_u8: np.ndarray, dst: Path, fps: float) -> None:
-    """Write a strictly binary {0,255} grayscale H.264 video.
-
-    Uses lossless x264 + yuv444p so chroma subsampling can't bleed
-    edge pixels into intermediate gray values.
-    """
-    t, h, w = frames_u8.shape
-    assert frames_u8.dtype == np.uint8
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        FFMPEG, "-y", "-loglevel", "error",
-        "-f", "rawvideo",
-        "-vcodec", "rawvideo",
-        "-s", f"{w}x{h}",
-        "-pix_fmt", "gray",
-        "-r", f"{fps:g}",
-        "-i", "-",
-        "-an",
-        "-vcodec", "libx264",
-        "-pix_fmt", "yuv444p",
-        "-preset", "veryfast",
-        "-qp", "0",
-        str(dst),
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    try:
-        proc.stdin.write(frames_u8.tobytes())
-        proc.stdin.close()
-    except BrokenPipeError:
-        pass
-    ret = proc.wait()
-    if ret != 0:
-        raise RuntimeError(f"ffmpeg failed ({ret}) for {dst}")
+def safe_name(raw: str) -> str:
+    s = str(raw)
+    if s.startswith("body:"):
+        s = s[len("body:"):]
+    return _SAFE_NAME.sub("_", s)
 
 
 def process_one_traj(
@@ -126,7 +64,7 @@ def process_one_traj(
         legacy_json = traj_dir / "traj_task.json"
         seg_b2nd = traj_dir / "seg.b2nd"
         rgb_mp4 = traj_dir / "rgb.mp4"
-        out_mp4 = traj_dir / "target_obj_mask.mp4"
+        out_npz = None
 
         if meta_json.is_file():
             src_json = meta_json
@@ -138,15 +76,10 @@ def process_one_traj(
             return (str(traj_dir), "skip:no_seg_b2nd")
         if not rgb_mp4.is_file():
             return (str(traj_dir), "skip:no_rgb_mp4")
-        if out_mp4.is_file() and meta_json.is_file() and not overwrite:
-            existing = json.loads(meta_json.read_text())
-            if "target_object" in existing and "target_obj_mask" in existing:
-                return (str(traj_dir), "skip:exists")
 
         meta = json.loads(src_json.read_text())
         actors = meta.get("actors", [])
 
-        seg_id_to_idx = {a["seg_id"]: i for i, a in enumerate(actors)}
         wanted = set(target_body_names)
         matched: list[dict] = []
         seen_ids: set[int] = set()
@@ -174,6 +107,19 @@ def process_one_traj(
             short = a["name"][len("body:"):]
             body_names.append(short if short else f"<child_of:seg_id={a['seg_id']}>")
 
+        target_obj = safe_name(body_names[0]) if body_names else "target"
+        out_npz = traj_dir / f"mask_{target_obj}.npz"
+
+        if out_npz.is_file() and meta_json.is_file() and not overwrite:
+            existing = json.loads(meta_json.read_text())
+            tom = existing.get("target_obj_mask", {})
+            if (
+                "target_object" in existing
+                and isinstance(tom, dict)
+                and tom.get("file") == out_npz.name
+            ):
+                return (str(traj_dir), "skip:exists")
+
         if dry_run:
             return (str(traj_dir), f"dry:{body_names}->{seg_ids}")
 
@@ -181,18 +127,16 @@ def process_one_traj(
         mask = np.isin(seg, seg_ids)
         frames = (mask.astype(np.uint8) * 255)
         T, H, W = frames.shape
-        fps = read_rgb_fps(rgb_mp4)
-        write_gray_mp4(frames, out_mp4, fps)
+        np.savez_compressed(out_npz, mask=frames)
 
         meta["target_object"] = {
             "body_names": body_names,
             "seg_ids": seg_ids,
         }
         meta["target_obj_mask"] = {
-            "file": out_mp4.name,
-            "format": "h264_lossless_yuv444p",
+            "file": out_npz.name,
+            "format": "npz_uint8_binary",
             "binary_values": [0, 255],
-            "fps": float(fps),
             "num_frames": int(T),
             "height": int(H),
             "width": int(W),

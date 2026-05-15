@@ -116,6 +116,8 @@ def main():
     p_c = sub.add_parser("compress", help="compress seg.npy")
     p_c.add_argument("--seg", type=str, help="Path to seg.npy")
     p_c.add_argument("--seg-dir", type=str, help="Directory containing seg.npy")
+    p_c.add_argument("--root", type=str, default=None,
+                     help="Recursively find all seg.npy under this root and compress them all")
     p_c.add_argument("--method", type=str, default="b2nd", choices=["b2nd", "npz"])
     p_c.add_argument("--out", type=str, default=None, help="Output compressed file path")
     p_c.add_argument("--clevel", type=int, default=5)
@@ -129,28 +131,49 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "compress":
-        if args.seg is not None:
+        if args.root is not None:
+            # Batch mode: recursively compress all seg.npy under root
+            root_path = Path(args.root)
+            seg_files = sorted(root_path.rglob("seg.npy"))
+            if not seg_files:
+                print(f"No seg.npy found under {root_path}")
+                return
+            for seg_npy in seg_files:
+                try:
+                    out_path = compress_seg(
+                        seg_npy=seg_npy,
+                        method=args.method,
+                        out_path=None,
+                        clevel=args.clevel,
+                        verify=not args.no_verify,
+                        delete_source=args.delete_source,
+                    )
+                    print(f"compressed: {out_path}")
+                except Exception as e:
+                    print(f"[WARN] skipped {seg_npy}: {e}")
+        elif args.seg is not None:
             seg_npy = Path(args.seg)
         elif args.seg_dir is not None:
             seg_npy = Path(args.seg_dir) / "seg.npy"
         else:
-            raise SystemExit("Please provide --seg or --seg-dir")
+            raise SystemExit("Please provide --seg, --seg-dir, or --root")
 
-        out = Path(args.out) if args.out is not None else None
-        out_path = compress_seg(
-            seg_npy=seg_npy,
-            method=args.method,
-            out_path=out,
-            clevel=args.clevel,
-            verify=not args.no_verify,
-            delete_source=args.delete_source,
-        )
-        raw_bytes = seg_npy.stat().st_size if seg_npy.exists() else 0
-        comp_bytes = out_path.stat().st_size
-        ratio = (raw_bytes / comp_bytes) if (raw_bytes > 0 and comp_bytes > 0) else 0.0
-        print(f"compressed: {out_path}")
-        if ratio > 0:
-            print(f"ratio: {ratio:.2f}x")
+        if args.root is None:
+            out = Path(args.out) if args.out is not None else None
+            out_path = compress_seg(
+                seg_npy=seg_npy,
+                method=args.method,
+                out_path=out,
+                clevel=args.clevel,
+                verify=not args.no_verify,
+                delete_source=args.delete_source,
+            )
+            raw_bytes = seg_npy.stat().st_size if seg_npy.exists() else 0
+            comp_bytes = out_path.stat().st_size
+            ratio = (raw_bytes / comp_bytes) if (raw_bytes > 0 and comp_bytes > 0) else 0.0
+            print(f"compressed: {out_path}")
+            if ratio > 0:
+                print(f"ratio: {ratio:.2f}x")
 
     elif args.cmd == "decompress":
         in_file = Path(args.in_file)

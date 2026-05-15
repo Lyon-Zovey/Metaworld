@@ -53,6 +53,36 @@ def build_poses_world(positions: np.ndarray, quats_wxyz: np.ndarray) -> np.ndarr
     return poses
 
 
+_DEFAULT_MAPPING = Path(__file__).parent / "target_objects.json"
+
+
+def _resolve_target_bodies(traj_dir: Path, mapping: dict) -> set[str]:
+    """Return target body names from target_objects.json, including child_of expansions."""
+    task_id = traj_dir.parent.parent.name
+    if task_id not in mapping:
+        return set()
+    entry = mapping[task_id]
+    target = set(entry.get("target_bodies", []))
+    child_of = set(entry.get("child_of", []))
+    if not child_of:
+        return target
+
+    # expand child_of: include the anonymous body immediately following the parent in actors
+    for src in [traj_dir / "meta.json", traj_dir / "traj_task.json"]:
+        if src.exists():
+            actors = json.loads(src.read_text()).get("actors", [])
+            for i, a in enumerate(actors):
+                if not a["name"].startswith("body:"):
+                    continue
+                short = a["name"][len("body:"):]
+                if short in child_of and i + 1 < len(actors):
+                    nxt = actors[i + 1]
+                    if nxt["name"].startswith("body:"):
+                        target.add(nxt["name"][len("body:"):])
+            break
+    return target
+
+
 def find_traj_h5(traj_dir: Path) -> Path:
     cands = sorted(traj_dir.glob("traj_*.h5"))
     if not cands:
@@ -62,7 +92,7 @@ def find_traj_h5(traj_dir: Path) -> Path:
     return cands[0]
 
 
-def process_one_traj(traj_dir: Path, overwrite: bool = False) -> tuple[Path, str]:
+def process_one_traj(traj_dir: Path, overwrite: bool = False, target_bodies=None) -> tuple[Path, str]:
     h5_path = find_traj_h5(traj_dir)
     meta_path = traj_dir / "meta.json"
 
@@ -86,7 +116,7 @@ def process_one_traj(traj_dir: Path, overwrite: bool = False) -> tuple[Path, str
             raw_name = sub.attrs.get("name", f"body:{bid}")
             if isinstance(raw_name, bytes):
                 raw_name = raw_name.decode()
-            obj_name = safe_name(str(raw_name))
+            obj_name = safe_name(str(raw_name)) or f"body_{bid}"
 
             if obj_name in used_names:
                 used_names[obj_name] += 1
@@ -104,6 +134,8 @@ def process_one_traj(traj_dir: Path, overwrite: bool = False) -> tuple[Path, str
                 )
 
             out_npy = traj_dir / f"pose_{obj_name}.npy"
+            if target_bodies and obj_name not in target_bodies:
+                continue
             if out_npy.exists() and not overwrite:
                 continue
             poses = build_poses_world(pos, quat)
@@ -129,9 +161,10 @@ def process_one_traj(traj_dir: Path, overwrite: bool = False) -> tuple[Path, str
 
 
 def _worker(args):
-    traj_dir, overwrite = args
+    traj_dir, overwrite, mapping = args
     try:
-        td, status = process_one_traj(Path(traj_dir), overwrite=overwrite)
+        target_bodies = _resolve_target_bodies(Path(traj_dir), mapping)
+        td, status = process_one_traj(Path(traj_dir), overwrite=overwrite, target_bodies=target_bodies or None)
         return (str(td), status, None)
     except Exception as e:
         return (str(traj_dir), "ERROR", f"{e}\n{traceback.format_exc()}")
@@ -164,6 +197,8 @@ def main():
     g.add_argument("--root",     type=Path)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--num-procs", type=int, default=1)
+    ap.add_argument("--mapping", type=Path, default=_DEFAULT_MAPPING,
+                    help="target_objects.json; omit to extract all bodies")
     args = ap.parse_args()
 
     if args.traj_dir is not None:
@@ -178,7 +213,8 @@ def main():
         sys.exit(1)
 
     print(f"[extract_body_poses] {len(traj_dirs)} trajectory dir(s)  procs={args.num_procs}")
-    items = [(str(p), args.overwrite) for p in traj_dirs]
+    mapping = json.loads(args.mapping.read_text()) if args.mapping and args.mapping.exists() else {}
+    items = [(str(p), args.overwrite, mapping) for p in traj_dirs]
 
     if args.num_procs <= 1:
         results = [_worker(it) for it in items]

@@ -4,8 +4,10 @@
 For each traj_N/ writes:
   mesh_<obj>.ply        binary little-endian PLY (vertex + face)
                         vertices are in the body's local frame already, i.e.
-                        p_world = pose_<obj>[t] @ [p_vertex; 1]
+                        p_cam_h = T_body2cam[t] @ [v_body; 1]
 and updates traj_N/meta.json "meshes" section indexed by name.
+
+Only bodies listed in meta.json["target_object"]["body_names"] are exported.
 
 <obj> is the body name with the leading "body:" prefix stripped.
 
@@ -348,7 +350,7 @@ def build_body_meshes(model) -> dict[int, dict]:
     out: dict[int, dict] = {}
     for bid in range(model.nbody):
         raw_name = model.body(bid).name or f"body_{bid}"
-        obj_name = safe_name(raw_name)
+        obj_name = safe_name(raw_name) or f"body_{bid}"
         if obj_name in used_names:
             used_names[obj_name] += 1
             obj_name = f"{obj_name}_{used_names[obj_name]}"
@@ -373,6 +375,63 @@ def build_body_meshes(model) -> dict[int, dict]:
     return out
 
 
+def collect_target_mesh(model, root_bid: int) -> tuple[np.ndarray, np.ndarray]:
+    """Merge geoms of `root_bid` and all its descendants into root-body-local frame.
+
+    Each descendant body has a pose (body_pos, body_quat) expressed in its parent's
+    local frame, so the chain T_root_from_d = T_root_from_p @ ... @ T_p_from_d
+    transforms its geoms back into root-body-local coords.
+    """
+    children: dict[int, list[int]] = {}
+    for c in range(model.nbody):
+        p = int(model.body_parentid[c])
+        if c == p:
+            continue
+        children.setdefault(p, []).append(c)
+
+    parts: list[tuple[np.ndarray, np.ndarray]] = []
+
+    def walk(bid: int, T_root_from_b: np.ndarray) -> None:
+        a = int(model.body_geomadr[bid])
+        n = int(model.body_geomnum[bid])
+        R_rb = T_root_from_b[:3, :3]
+        t_rb = T_root_from_b[:3, 3]
+        for k in range(n):
+            res = geom_to_body_mesh(model, a + k)
+            if res is None:
+                continue
+            V_b, F = res
+            V_root = (R_rb @ V_b.T.astype(np.float64)).T + t_rb
+            parts.append((V_root.astype(np.float32), F))
+        for c in children.get(bid, []):
+            R_bc = quat_wxyz_to_R(model.body_quat[c])
+            t_bc = np.asarray(model.body_pos[c], dtype=np.float64)
+            T_b_from_c = np.eye(4, dtype=np.float64)
+            T_b_from_c[:3, :3] = R_bc
+            T_b_from_c[:3, 3] = t_bc
+            walk(c, T_root_from_b @ T_b_from_c)
+
+    walk(root_bid, np.eye(4, dtype=np.float64))
+    return merge_body_meshes(parts)
+
+
+def build_target_meshes(model, target_names: set[str]) -> dict[int, dict]:
+    """Like build_body_meshes but restricted to `target_names`, and pulling in
+    descendant-body geoms transformed into the target body's local frame.
+    """
+    out: dict[int, dict] = {}
+    for bid in range(model.nbody):
+        raw_name = model.body(bid).name or ""
+        obj_name = safe_name(raw_name)
+        if obj_name not in target_names:
+            continue
+        V, F = collect_target_mesh(model, bid)
+        if F.shape[0] == 0:
+            continue
+        out[bid] = {"obj_name": obj_name, "V": V, "F": F}
+    return out
+
+
 def process_env(env_root: Path, env_name: str | None = None,
                 overwrite: bool = False) -> str:
     env_root = env_root.resolve()
@@ -384,9 +443,20 @@ def process_env(env_root: Path, env_name: str | None = None,
     if not traj_dirs:
         return f"{env_name}: no traj dirs"
 
+    target_names: set[str] = set()
+    for traj_dir in traj_dirs:
+        meta_path = traj_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text())
+        for n in meta.get("target_object", {}).get("body_names", []):
+            target_names.add(safe_name(n))
+    if not target_names:
+        return f"{env_name}: no target_object.body_names found in any meta.json"
+
     env, model = build_env_model(env_name)
     try:
-        body_meshes = build_body_meshes(model)
+        body_meshes = build_target_meshes(model, target_names)
     finally:
         try:
             env.close()
@@ -395,12 +465,23 @@ def process_env(env_root: Path, env_name: str | None = None,
 
     n_traj_updated = 0
     for traj_dir in traj_dirs:
+        meta_path = traj_dir / "meta.json"
+        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        traj_targets = {
+            safe_name(n)
+            for n in meta.get("target_object", {}).get("body_names", [])
+        }
+        if not traj_targets:
+            continue
+
         files_map: dict[str, str] = {}
         seg_id_map: dict[str, int] = {}
         n_verts: dict[str, int] = {}
         n_faces: dict[str, int] = {}
         for bid, entry in body_meshes.items():
             obj = entry["obj_name"]
+            if obj not in traj_targets:
+                continue
             out_ply = traj_dir / f"mesh_{obj}.ply"
             if not (out_ply.exists() and not overwrite):
                 write_ply_binary(out_ply, entry["V"], entry["F"])
@@ -409,11 +490,9 @@ def process_env(env_root: Path, env_name: str | None = None,
             n_verts[obj] = int(entry["V"].shape[0])
             n_faces[obj] = int(entry["F"].shape[0])
 
-        meta_path = traj_dir / "meta.json"
-        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
         meta["meshes"] = {
-            "format": "binary_little_endian PLY; vertices in body-local frame "
-                      "(p_world = pose_<obj>[t] @ [v; 1]).",
+            "format": "binary_little_endian PLY; vertices are in body-local "
+                      "frame (p_cam_h = T_body2cam[t] @ [v_body; 1]).",
             "files":   files_map,
             "seg_ids": seg_id_map,
             "num_vertices": n_verts,
@@ -422,8 +501,8 @@ def process_env(env_root: Path, env_name: str | None = None,
         meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
         n_traj_updated += 1
 
-    return (f"{env_name}: bodies_with_mesh={len(body_meshes)}  "
-            f"trajs_updated={n_traj_updated}")
+    return (f"{env_name}: target_bodies={sorted(target_names)}  "
+            f"meshes_built={len(body_meshes)}  trajs_updated={n_traj_updated}")
 
 
 def main():

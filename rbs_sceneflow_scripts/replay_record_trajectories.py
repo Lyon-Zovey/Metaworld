@@ -512,6 +512,197 @@ def replay_and_record_traj(
 
 
 # ---------------------------------------------------------------------------
+# Multi-camera single-replay variant
+# ---------------------------------------------------------------------------
+
+def replay_and_record_traj_multicam(
+    env,
+    mt1,
+    in_h5f:      h5py.File,
+    out_h5f:     h5py.File,
+    ep_idx:      int,
+    episode:     dict,
+    cam_configs: list,   # list of {"cam_id": int, "cam_name": str, "cam_K": np.ndarray}
+    rgb_ren:     mujoco.Renderer,
+    depth_ren:   mujoco.Renderer,
+    seg_ren:     mujoco.Renderer,
+    cam_data_root: Path,
+    fps:         float,
+    env_name:    str = "",
+) -> None:
+    """Replay one trajectory, recording all cameras in a single env-state pass.
+
+    Each camera's files are written to cam_data_root/traj_N/<cam_name>/.
+    Body id_poses are computed in world frame once per frame, then projected
+    into each camera's frame separately.
+    """
+    traj_key = f"traj_{ep_idx}"
+    if traj_key not in in_h5f:
+        print(f"  [SKIP] {traj_key} not found in input H5")
+        return
+
+    in_grp = in_h5f[traj_key]
+    qpos_seq   = in_grp["env_states/qpos"][:]
+    qvel_seq   = in_grp["env_states/qvel"][:]
+    has_target = "env_states/target_pos" in in_grp
+    target_seq = in_grp["env_states/target_pos"][:] if has_target else None
+    T_plus_1   = qpos_seq.shape[0]
+
+    task_idx = episode.get("task_idx", ep_idx % len(mt1.train_tasks))
+    env.set_task(mt1.train_tasks[task_idx])
+    env.reset()
+
+    n_bodies = env.model.nbody
+    body_ids_tracked = list(range(1, n_bodies))
+
+    # Per-camera accumulators
+    cam_names = [c["cam_name"] for c in cam_configs]
+    rgb_frames   = {n: [] for n in cam_names}
+    depth_frames = {n: [] for n in cam_names}
+    seg_frames   = {n: [] for n in cam_names}
+    cam_poses    = {n: [] for n in cam_names}
+    # Per-camera body cam-frame buffers
+    id_cam_pos  = {n: {bid: [] for bid in body_ids_tracked} for n in cam_names}
+    id_cam_quat = {n: {bid: [] for bid in body_ids_tracked} for n in cam_names}
+    # Shared world-frame body buffers
+    id_buf_world: dict[int, dict[str, list]] = {
+        bid: {"position": [], "quaternion": []}
+        for bid in body_ids_tracked
+    }
+
+    for t in range(T_plus_1):
+        env.set_env_state((qpos_seq[t], qvel_seq[t]))
+        if target_seq is not None:
+            env._target_pos = target_seq[t].astype(np.float64)
+
+        # Collect world-frame body poses once per frame (camera-independent)
+        for bid in body_ids_tracked:
+            id_buf_world[bid]["position"].append(
+                np.copy(env.data.xpos[bid]).astype(np.float32))
+            id_buf_world[bid]["quaternion"].append(
+                np.copy(env.data.xquat[bid]).astype(np.float32))
+
+        # Render all cameras for this frame
+        for cfg in cam_configs:
+            cid   = cfg["cam_id"]
+            cname = cfg["cam_name"]
+
+            rgb = render_rgb(rgb_ren, env.data, cid)
+            rgb_frames[cname].append(rgb)
+
+            depth_raw = render_depth(depth_ren, env.data, cid)
+            if depth_raw.size > 0:
+                far_thresh = float(depth_raw.max()) * 0.995
+                depth_raw = np.where(depth_raw >= far_thresh, 0.0, depth_raw)
+            depth_frames[cname].append(depth_raw)
+
+            seg = render_seg_body_ids(seg_ren, env.data, cid, env.model)
+            seg_frames[cname].append(seg)
+
+            cam_pos_v, cam_xmat = get_cam_pose(env.data, cid)
+            T_c2w = np.eye(4, dtype=np.float32)
+            T_c2w[:3, :3] = cam_xmat
+            T_c2w[:3, 3]  = cam_pos_v
+            cam_poses[cname].append(T_c2w)
+
+            R_w2c = cam_xmat.T
+            t_w2c = -(R_w2c @ cam_pos_v)
+
+            for bid in body_ids_tracked:
+                pos_world  = id_buf_world[bid]["position"][-1]
+                body_xmat  = np.copy(env.data.xmat[bid]).reshape(3, 3).astype(np.float32)
+                pos_cam    = (R_w2c @ pos_world + t_w2c).astype(np.float32)
+                R_body_cam = (R_w2c @ body_xmat).astype(np.float32)
+                quat_cam   = mat3_to_quat_wxyz(R_body_cam)
+                id_cam_pos[cname][bid].append(pos_cam)
+                id_cam_quat[cname][bid].append(quat_cam)
+
+    # Copy input traj to main H5 once (use world-frame id_poses, first camera
+    # for camera_position/quaternion so the file stays schema-compatible)
+    in_h5f.copy(traj_key, out_h5f)
+    out_grp = out_h5f[traj_key]
+    first_cam_name = cam_configs[0]["cam_name"]
+    out_grp.attrs["camera_name"] = "+".join(cam_names)
+
+    id_grp = out_grp.create_group("id_poses", track_order=True)
+    for bid in body_ids_tracked:
+        body_name = env.model.body(bid).name
+        id_grp.attrs[str(bid)] = f"body:{body_name}"
+    for bid in body_ids_tracked:
+        body_name = env.model.body(bid).name
+        sg = id_grp.create_group(str(bid), track_order=True)
+        sg.attrs["name"]   = f"body:{body_name}"
+        sg.attrs["seg_id"] = bid
+        sg.create_dataset("position",          data=np.array(id_buf_world[bid]["position"],       dtype=np.float32))
+        sg.create_dataset("quaternion",        data=np.array(id_buf_world[bid]["quaternion"],      dtype=np.float32))
+        sg.create_dataset("camera_position",   data=np.array(id_cam_pos[first_cam_name][bid],     dtype=np.float32))
+        sg.create_dataset("camera_quaternion", data=np.array(id_cam_quat[first_cam_name][bid],    dtype=np.float32))
+
+    # Write per-camera directories and per-camera H5 files
+    traj_root = cam_data_root / traj_key
+    for cfg in cam_configs:
+        cname = cfg["cam_name"]
+        cam_K = cfg["cam_K"]
+
+        cam_dir = traj_root / cname
+        cam_dir.mkdir(parents=True, exist_ok=True)
+
+        save_rgb_video(rgb_frames[cname], str(cam_dir / "rgb.mp4"), fps)
+        np.save(str(cam_dir / "depth_video.npy"),
+                np.stack(depth_frames[cname], axis=0).astype(np.float16))
+        np.save(str(cam_dir / "seg.npy"),
+                np.stack(seg_frames[cname], axis=0))
+        np.save(str(cam_dir / "cam_poses.npy"),
+                np.stack(cam_poses[cname], axis=0))
+        np.save(str(cam_dir / "cam_intrinsics.npy"), cam_K)
+        (cam_dir / "camera_name.txt").write_text(cname + "\n")
+
+        traj_task = {
+            "task_id":   env_name,
+            "traj_name": traj_key,
+            "actors": [
+                {"seg_id": bid, "name": f"body:{env.model.body(bid).name}"}
+                for bid in body_ids_tracked
+                if not env.model.body(bid).name.startswith("link:")
+            ],
+            "links": [
+                {"seg_id": bid, "name": f"link:{env.model.body(bid).name}"}
+                for bid in body_ids_tracked
+                if env.model.body(bid).name.startswith("link:")
+            ],
+        }
+        with open(str(cam_dir / "traj_task.json"), "w", encoding="utf-8") as _jf:
+            json.dump(traj_task, _jf, ensure_ascii=False, indent=2)
+
+        # Per-camera H5: camera-specific id_poses (camera_position/quaternion)
+        per_h5_path = cam_dir / f"{traj_key}.h5"
+        with h5py.File(str(per_h5_path), "w") as ph5:
+            in_h5f.copy(traj_key, ph5)
+            pg = ph5[traj_key]
+            pg.attrs["camera_name"] = cname
+            pid_grp = pg.create_group("id_poses", track_order=True)
+            for bid in body_ids_tracked:
+                body_name = env.model.body(bid).name
+                pid_grp.attrs[str(bid)] = f"body:{body_name}"
+            for bid in body_ids_tracked:
+                body_name = env.model.body(bid).name
+                sg = pid_grp.create_group(str(bid), track_order=True)
+                sg.attrs["name"]   = f"body:{body_name}"
+                sg.attrs["seg_id"] = bid
+                sg.create_dataset("position",          data=np.array(id_buf_world[bid]["position"],   dtype=np.float32))
+                sg.create_dataset("quaternion",        data=np.array(id_buf_world[bid]["quaternion"],  dtype=np.float32))
+                sg.create_dataset("camera_position",   data=np.array(id_cam_pos[cname][bid],          dtype=np.float32))
+                sg.create_dataset("camera_quaternion", data=np.array(id_cam_quat[cname][bid],         dtype=np.float32))
+
+    print(
+        f"  traj_{ep_idx:04d}  steps={episode['elapsed_steps']:3d}"
+        f"  success={episode['success']}"
+        f"  cameras={cam_names}"
+        f"  → {traj_root}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Parallel helpers (used when --num-procs > 1)
 # ---------------------------------------------------------------------------
 
@@ -538,7 +729,9 @@ def _build_worker_cmd(
         cmd += ["--traj-id", str(args.traj_id)]
     if args.success_only:
         cmd.append("--success-only")
-    if args.random_camera:
+    if getattr(args, "multi_cameras", None):
+        cmd += ["--multi-cameras"] + args.multi_cameras
+    elif args.random_camera:
         cmd.append("--random-camera")
         cmd += ["--cameras"] + args.cameras
     else:
@@ -626,7 +819,11 @@ def _spawn_workers(args: argparse.Namespace, selected: list[int]) -> None:
     env_info   = json_data["env_info"]
     out_json   = copy.deepcopy(json_data)
     out_json["env_info"]["env_kwargs"]["obs_mode"] = OUT_OBS_MODE
-    cam_desc   = ("random:" + "+".join(args.cameras)) if args.random_camera else args.camera
+    cam_desc = (
+        "multi:" + "+".join(args.multi_cameras) if getattr(args, "multi_cameras", None)
+        else ("random:" + "+".join(args.cameras)) if args.random_camera
+        else args.camera
+    )
     out_json["source_desc"] = (
         f"Metaworld scripted policy replay+record "
         f"(env={env_info['env_id']}, camera={cam_desc})"
@@ -698,7 +895,10 @@ def main(args: argparse.Namespace) -> None:
 
     # Camera pool for (optional) per-trajectory randomisation
     camera_pool = args.cameras  # list[str], always set by argparse default
-    if args.random_camera:
+    multi_cameras = getattr(args, "multi_cameras", None) or []
+    if multi_cameras:
+        print(f"Camera mode   : MULTI  cameras={multi_cameras}")
+    elif args.random_camera:
         print(f"Camera mode   : RANDOM  pool={camera_pool}")
     else:
         print(f"Camera mode   : fixed={args.camera}")
@@ -736,7 +936,11 @@ def main(args: argparse.Namespace) -> None:
     # Output JSON (copy + update obs_mode)
     out_json = copy.deepcopy(json_data)
     out_json["env_info"]["env_kwargs"]["obs_mode"] = OUT_OBS_MODE
-    camera_desc = "random:" + "+".join(camera_pool) if args.random_camera else args.camera
+    camera_desc = (
+        "multi:" + "+".join(multi_cameras) if multi_cameras
+        else "random:" + "+".join(camera_pool) if args.random_camera
+        else args.camera
+    )
     out_json["source_desc"] = (
         f"Metaworld scripted policy replay+record "
         f"(env={env_name}, seed={seed}, camera={camera_desc})"
@@ -751,33 +955,56 @@ def main(args: argparse.Namespace) -> None:
         h5py.File(str(out_h5_path),  "w") as out_h5f,
     ):
         for ep_idx in selected:
-            # --- per-trajectory camera selection ---
-            if args.random_camera:
-                cam_name = random.choice(camera_pool)
+            if multi_cameras:
+                cam_configs = []
+                for cname in multi_cameras:
+                    cid = get_camera_id(env.model, cname)
+                    cK  = compute_intrinsics(env.model, cid, args.width, args.height)
+                    cam_configs.append({"cam_id": cid, "cam_name": cname, "cam_K": cK})
+                replay_and_record_traj_multicam(
+                    env=env,
+                    mt1=mt1,
+                    in_h5f=in_h5f,
+                    out_h5f=out_h5f,
+                    ep_idx=ep_idx,
+                    episode=episodes[ep_idx],
+                    cam_configs=cam_configs,
+                    rgb_ren=rgb_ren,
+                    depth_ren=depth_ren,
+                    seg_ren=seg_ren,
+                    cam_data_root=cam_data_root,
+                    fps=args.fps,
+                    env_name=env_name,
+                )
+                cam_name_per_traj[ep_idx] = "+".join(multi_cameras)
             else:
-                cam_name = args.camera
-            cam_name_per_traj[ep_idx] = cam_name
+                # --- per-trajectory camera selection ---
+                if args.random_camera:
+                    cam_name = random.choice(camera_pool)
+                else:
+                    cam_name = args.camera
+                cam_name_per_traj[ep_idx] = cam_name
 
-            cam_id = get_camera_id(env.model, cam_name)
-            cam_K  = compute_intrinsics(env.model, cam_id, args.width, args.height)
+                cam_id = get_camera_id(env.model, cam_name)
+                cam_K  = compute_intrinsics(env.model, cam_id, args.width, args.height)
 
-            replay_and_record_traj(
-                env=env,
-                mt1=mt1,
-                in_h5f=in_h5f,
-                out_h5f=out_h5f,
-                ep_idx=ep_idx,
-                episode=episodes[ep_idx],
-                cam_id=cam_id,
-                cam_name=cam_name,
-                cam_K=cam_K,
-                rgb_ren=rgb_ren,
-                depth_ren=depth_ren,
-                seg_ren=seg_ren,
-                cam_data_root=cam_data_root,
-                fps=args.fps,
-                env_name=env_name,
-            )
+                replay_and_record_traj(
+                    env=env,
+                    mt1=mt1,
+                    in_h5f=in_h5f,
+                    out_h5f=out_h5f,
+                    ep_idx=ep_idx,
+                    episode=episodes[ep_idx],
+                    cam_id=cam_id,
+                    cam_name=cam_name,
+                    cam_K=cam_K,
+                    rgb_ren=rgb_ren,
+                    depth_ren=depth_ren,
+                    seg_ren=seg_ren,
+                    cam_data_root=cam_data_root,
+                    fps=args.fps,
+                    env_name=env_name,
+                )
 
     # Write output JSON – embed the chosen camera name into each episode record
     out_episodes = []
@@ -833,6 +1060,13 @@ def parse_args() -> argparse.Namespace:
         help="Only process trajectories where success=True.",
     )
     p.add_argument("--fps",    type=float, default=30.0, help="FPS for rgb.mp4.")
+    p.add_argument(
+        "--multi-cameras", type=str, nargs="+", default=None,
+        metavar="CAM",
+        help="Record multiple cameras in one replay pass. Each camera gets its own "
+             "camera_data/traj_N/<cam_name>/ subdir with full sceneflow-ready data. "
+             "E.g. --multi-cameras corner corner2 corner3",
+    )
     p.add_argument("--camera", type=str,   default="corner",
                    help="MuJoCo camera name (used when --random-camera is NOT set): "
                         "corner | topview | corner2 | corner3 | corner4")

@@ -11,8 +11,9 @@ NUM_EPISODES="${NUM_EPISODES:-5}"
 # ────────────────────────────────────────────────────────────
 
 SAVE_DIR="${SAVE_DIR:-dataset}"
-H5_FILE="rollout_data/${ENV_NAME}/trajectory.state.mocap_xyz.mujoco_cpu.h5"
-JSON_FILE="rollout_data/${ENV_NAME}/trajectory.state.mocap_xyz.mujoco_cpu.json"
+ROLLOUT_DIR="${ROLLOUT_DIR:-rollout_data}"
+H5_FILE="${ROLLOUT_DIR}/${ENV_NAME}/trajectory.state.mocap_xyz.mujoco_cpu.h5"
+JSON_FILE="${ROLLOUT_DIR}/${ENV_NAME}/trajectory.state.mocap_xyz.mujoco_cpu.json"
 DATASET_DIR="${SAVE_DIR}/${ENV_NAME}/camera_data"
 
 echo ""
@@ -25,7 +26,7 @@ echo "=== [1/7] Rollout scripted policy ==="
 python rbs_sceneflow_scripts/rollout_scripted_policy.py \
   --env-name "${ENV_NAME}" \
   --num-episodes "${NUM_EPISODES}" \
-  --output-dir rollout_data
+  --output-dir "${ROLLOUT_DIR}"
 
 echo ""
 echo "=== [2/7] Replay & record trajectories ==="
