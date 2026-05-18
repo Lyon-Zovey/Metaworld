@@ -41,7 +41,6 @@ def load_meshes(traj_dir: Path) -> dict[str, trimesh.Trimesh]:
 
 FLIP3 = np.array([1.0, -1.0, -1.0], dtype=np.float32)
 FLIP4 = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
-ROT_Z_180 = np.diag([-1.0, -1.0, 1.0, 1.0]).astype(np.float32)
 
 
 def load_first_flow(traj_dir: Path):
@@ -249,11 +248,6 @@ def main():
     ds = args.downsample
     flow_ds = flow[:, ::ds, ::ds, :]
 
-    # When --rot-z-180 is set, sceneflow points get (x,y,z)->(-x,-y,z) in the
-    # CAMERA frame (before cam2world). Apply the same cam-frame rotation to
-    # obj_pose by left-multiplying ROT_Z_180 into the body->cam pose.
-    pose_cam_xform = ROT_Z_180 if args.rot_z_180 else np.eye(4, dtype=np.float32)
-
     server = viser.ViserServer(host="0.0.0.0", port=args.port)
     print(f"Viser running at http://0.0.0.0:{args.port}")
 
@@ -311,7 +305,7 @@ def main():
 
         for name, pose_arr in poses.items():
             pose = pose_arr[t]
-            pose_world = cam2world_for_pose[t] @ pose_cam_xform @ pose
+            pose_world = cam2world_for_pose[t] @ pose
 
             if name in obj_frame_handles:
                 obj_frame_handles[name].remove()
@@ -352,7 +346,7 @@ def main():
 
     for name, pose_arr in poses.items():
         obj_world_positions = np.array([
-            (cam2world_for_pose[t] @ pose_cam_xform @ pose_arr[t])[:3, 3] for t in range(T)
+            (cam2world_for_pose[t] @ pose_arr[t])[:3, 3] for t in range(T)
         ])
         obj_segments = np.stack(
             [obj_world_positions[:-1], obj_world_positions[1:]], axis=1

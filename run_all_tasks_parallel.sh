@@ -15,10 +15,10 @@
 # ║                          可 调 参 数  ← 直接改这里                         ║
 # ╠══════════════════════════════════════════════════════════════════════════╣
 
-NUM_EPISODES="${NUM_EPISODES:-50}"
+NUM_EPISODES="${NUM_EPISODES:-1000}"
 # 每个任务最多尝试采集的 episodes 数（success-only 过滤后可能更少）
 
-N_WORKERS="${N_WORKERS:-24}"
+N_WORKERS="${N_WORKERS:-28}"
 # 同时并行的任务数。
 # Metaworld 是纯 CPU（mujoco_cpu），每个任务约占 2-4 核；
 # 建议 N_WORKERS ≤ CPU核心数 / 4，避免内存/调度竞争。
@@ -35,7 +35,7 @@ REPLAY_HEIGHT="${REPLAY_HEIGHT:-480}"
 CAMERAS="${CAMERAS:-corner corner2 corner3}"
 # 随机摄像头池（空格分隔），传给 replay_record_trajectories.py --cameras
 
-SAVE_DIR="${SAVE_DIR:-/mnt2/liangzhuowei/Metaworld/datasets_500_fixed}"
+SAVE_DIR="${SAVE_DIR:-/mnt2/liangzhuowei/Metaworld/datasets_1000}"
 # 落盘根目录（相对脚本所在位置），每个任务写入 $SAVE_DIR/<task_name>/
 
 CONDA_ENV="${CONDA_ENV:-metaworld}"
