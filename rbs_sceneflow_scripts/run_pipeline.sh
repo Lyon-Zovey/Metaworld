@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Full data collection pipeline for a single Metaworld env.
 # Usage:
-#   bash run_pipeline.sh
+#   bash rbs_sceneflow_scripts/run_pipeline.sh
 #   或直接改下面两行后运行
 set -euo pipefail
+
+# Always run from repo root so relative `rbs_sceneflow_scripts/...` paths resolve.
+cd "$(dirname "$0")/.."
 
 # ── 修改这两行（或通过环境变量覆盖）──────────────────────────
 ENV_NAME="${ENV_NAME:-drawer-close-v3}"

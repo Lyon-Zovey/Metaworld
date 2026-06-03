@@ -20,13 +20,13 @@ Outputs written into the traj dir:
     target_obj_mask.mp4      (T, H, W) binary video, same fps/size as rgb
     meta.json                exact spec required (overwrites prior meta.json)
 
-Target body resolution uses scripts/target_objects.json + traj_task.json actors
+Target body resolution uses rbs_sceneflow_scripts/target_objects.json + traj_task.json actors
 (handles the "child_of" anonymous-child case).
 
 Usage:
-    python scripts/build_mikasa_format.py --traj-dir <path>
-    python scripts/build_mikasa_format.py --root <dataset_root>      # serial
-    python scripts/build_mikasa_format.py --root <dataset_root> -j N # parallel
+    python rbs_sceneflow_scripts/build_mikasa_format.py --traj-dir <path>
+    python rbs_sceneflow_scripts/build_mikasa_format.py --root <dataset_root>      # serial
+    python rbs_sceneflow_scripts/build_mikasa_format.py --root <dataset_root> -j N # parallel
 """
 from __future__ import annotations
 
@@ -48,12 +48,12 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "rbs_sceneflow_scripts"))
 
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
 FLIP4 = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
-DEFAULT_MAPPING = REPO / "scripts" / "target_objects.json"
+DEFAULT_MAPPING = REPO / "rbs_sceneflow_scripts" / "target_objects.json"
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ def inv44_batch(T: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Target body resolution (matches scripts/generate_target_obj_mask.py logic)
+# Target body resolution (matches rbs_sceneflow_scripts/generate_target_obj_mask.py logic)
 # ---------------------------------------------------------------------------
 
 def resolve_targets(actors: list, mapping_entry: dict) -> list[dict]:

@@ -27,16 +27,16 @@ Math (column-vector convention):
 
 Usage:
   # single traj dir
-  python scripts/build_pose_variants.py --root datasets_500_fixed_test/assembly-v3/camera_data/traj_0
+  python rbs_sceneflow_scripts/build_pose_variants.py --root datasets_500_fixed_test/assembly-v3/camera_data/traj_0
 
   # whole task (all traj_* under camera_data/)
-  python scripts/build_pose_variants.py --root datasets_500_fixed_test/assembly-v3/camera_data
+  python rbs_sceneflow_scripts/build_pose_variants.py --root datasets_500_fixed_test/assembly-v3/camera_data
 
   # whole dataset (all tasks)
-  python scripts/build_pose_variants.py --root datasets_500_fixed_test
+  python rbs_sceneflow_scripts/build_pose_variants.py --root datasets_500_fixed_test
 
   # overwrite already-produced files
-  python scripts/build_pose_variants.py --root ... --overwrite
+  python rbs_sceneflow_scripts/build_pose_variants.py --root ... --overwrite
 """
 from __future__ import annotations
 
@@ -267,7 +267,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1].strip())
     ap.add_argument("--root", required=True, help="traj dir, camera_data dir, task dir, or dataset root")
     ap.add_argument("--mapping", type=Path, default=_DEFAULT_MAPPING,
-                    help="target_objects.json (default: scripts/target_objects.json)")
+                    help="target_objects.json (default: rbs_sceneflow_scripts/target_objects.json)")
     ap.add_argument("--overwrite", action="store_true", help="overwrite already-produced files")
     args = ap.parse_args()
 

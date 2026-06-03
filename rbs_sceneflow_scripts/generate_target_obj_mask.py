@@ -17,12 +17,12 @@ For each task under <dataset_root>:
             }
 
 Mapping from task -> target body names is read from a separate JSON
-(see scripts/target_objects.json).
+(see rbs_sceneflow_scripts/target_objects.json).
 
 Usage:
-    python scripts/generate_target_obj_mask.py \
+    python rbs_sceneflow_scripts/generate_target_obj_mask.py \
         --dataset-root datasets_500 \
-        --mapping scripts/target_objects.json \
+        --mapping rbs_sceneflow_scripts/target_objects.json \
         [--tasks basketball-v3 hammer-v3] \
         [--dry-run] [--overwrite] [--limit-trajs N] [--workers N]
 """
@@ -183,7 +183,7 @@ def discover_jobs(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset-root", type=Path, default=Path("datasets_500"))
-    ap.add_argument("--mapping", type=Path, default=Path("scripts/target_objects.json"))
+    ap.add_argument("--mapping", type=Path, default=Path("rbs_sceneflow_scripts/target_objects.json"))
     ap.add_argument("--tasks", nargs="*", default=None,
                     help="subset of task ids; omit to run all tasks in mapping")
     ap.add_argument("--overwrite", action="store_true")

@@ -7,8 +7,8 @@
 #           最多同时跑 N_WORKERS 个任务。任务互相独立，落盘路径不重叠。
 #
 # 用法:
-#   bash run_all_tasks_parallel.sh
-#   N_WORKERS=8 NUM_EPISODES=20 bash run_all_tasks_parallel.sh
+#   bash rbs_sceneflow_scripts/run_all_tasks_parallel.sh
+#   N_WORKERS=8 NUM_EPISODES=20 bash rbs_sceneflow_scripts/run_all_tasks_parallel.sh
 # ============================================================================
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
@@ -100,7 +100,8 @@ TASKS=(
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 # ─── 路径 ─────────────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SCRIPT_DIR 指向仓库根（脚本本身在 rbs_sceneflow_scripts/，往上一级）。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${SAVE_DIR}" = /* ]]; then
     DATA_ROOT="${SAVE_DIR}"
     LOG_DIR="${SAVE_DIR}/_logs"
@@ -144,7 +145,7 @@ _run_task() {
     REPLAY_HEIGHT="${REPLAY_HEIGHT}" \
     MUJOCO_GL=egl \
     HDF5_USE_FILE_LOCKING=FALSE \
-    /mnt2/liangzhuowei/miniconda3/bin/conda run -n "${CONDA_ENV}" --no-capture-output bash run_pipeline.sh
+    /mnt2/liangzhuowei/miniconda3/bin/conda run -n "${CONDA_ENV}" --no-capture-output bash rbs_sceneflow_scripts/run_pipeline.sh
 }
 
 # ─── 并行调度：N_WORKERS 槽位 ─────────────────────────────────────────────

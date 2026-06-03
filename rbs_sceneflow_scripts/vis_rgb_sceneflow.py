@@ -34,7 +34,7 @@ import trimesh
 import viser
 import viser.transforms as tf
 
-sys.path.insert(0, str(Path(__file__).parent / "rbs_sceneflow_scripts/traj2sceneflow"))
+sys.path.insert(0, str(Path(__file__).parent / "traj2sceneflow"))
 from flow_compress import decompress_one_flow
 
 

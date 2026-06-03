@@ -18,7 +18,7 @@ import trimesh
 import viser
 import viser.transforms as tf
 
-sys.path.insert(0, str(Path(__file__).parent / "rbs_sceneflow_scripts/traj2sceneflow"))
+sys.path.insert(0, str(Path(__file__).parent / "traj2sceneflow"))
 from flow_compress import decompress_one_flow
 
 
@@ -96,9 +96,8 @@ def main():
                         help="Read meta.json and auto-apply OpenGL->OpenCV flow conversion when "
                              "flow_convention==opengl and cam2world.npy is in OpenCV convention")
     parser.add_argument("--fix-pose", action="store_true",
-                        help="Fix double-migrate bug: pose was body->cam but migrate_two_key_poses "
-                             "applied inv(c2w[0]) a second time. Multiply c2w[0] back to recover "
-                             "correct body->cam.")
+                        help="Fix double-migrate bug: pose was body->cam but inv(c2w[0]) was applied "
+                             "a second time. Multiply c2w[0] back to recover correct body->cam.")
     parser.add_argument("--cam0", action="store_true",
                         help="Use cam0 as world frame (use cam_poses relative to cam0 instead of cam2world)")
     parser.add_argument("--world", choices=["cam_poses", "cam2world_cv", "cam2world_gl"],
@@ -234,7 +233,7 @@ def main():
             poses[name] = (FLIP4 @ poses[name].astype(np.float32)).astype(np.float32)
         if args.fix_pose:
             poses[name] = (abs_c2w0 @ poses[name].astype(np.float32)).astype(np.float32)
-            print(f"  [fix-pose] applied c2w[0] @ pose to undo double migrate_two_key_poses")
+            print(f"  [fix-pose] applied c2w[0] @ pose to undo double body->cam migration")
         print(f"  {pf.name}: {poses[name].shape}")
 
     meshes: dict[str, trimesh.Trimesh] = {}

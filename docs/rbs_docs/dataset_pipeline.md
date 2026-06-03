@@ -225,15 +225,15 @@ traj_N/
 
 ```bash
 # 单个 traj
-python scripts/build_mikasa_format.py \
+python rbs_sceneflow_scripts/build_mikasa_format.py \
     --traj-dir dataset/hammer-v3/camera_data/traj_0
 
 # 单个 task（所有 traj）
-python scripts/build_mikasa_format.py \
+python rbs_sceneflow_scripts/build_mikasa_format.py \
     --task-dir dataset/hammer-v3
 
 # 全量数据集（并行，推荐）
-python scripts/build_mikasa_format.py \
+python rbs_sceneflow_scripts/build_mikasa_format.py \
     --root dataset \
     -j 8
 ```
@@ -335,7 +335,7 @@ sceneflow（`scene_point_flow_ref*.mp4` + `*.anchor.npy`）**保持 OpenGL 不�
 │  rgb/depth/seg/sceneflow                                            │
 └─────────────────────────────┬───────────────────────────────────────┘
                               │
-                              ▼  scripts/build_mikasa_format.py
+                              ▼  rbs_sceneflow_scripts/build_mikasa_format.py
 ┌─────────────────────────────────────────────────────────────────────┐
 │  build_mikasa_format.py  (单步完成，50 tasks × 50 trajs，≈4 min)     │
 │                                                                     │
@@ -450,12 +450,12 @@ sceneflow（`scene_point_flow_ref*.mp4` + `*.anchor.npy`）**保持 OpenGL 不�
 
 | 脚本 | 功能 |
 |---|---|
-| [scripts/build_mikasa_format.py](../scripts/build_mikasa_format.py) | 一步生成所有派生文件和 meta.json（**主入口**） |
-| [scripts/extract_meshes.py](../scripts/extract_meshes.py) | PLY 网格提取（被 build_mikasa_format 调用） |
-| [scripts/generate_target_obj_mask.py](../scripts/generate_target_obj_mask.py) | 独立生成 mask npz（单独使用时） |
-| [scripts/target_objects.json](../scripts/target_objects.json) | 每个 task 的目标 body 名称映射表 |
-| [scripts/build_pose_variants.py](../scripts/build_pose_variants.py) | 从已有 body-world pose 生成 cam 位姿变体 |
-| [vis_sceneflow.py](../vis_sceneflow.py) | Viser 可视化（`--auto` 自动处理 GL→CV 转换） |
+| [rbs_sceneflow_scripts/build_mikasa_format.py](../../rbs_sceneflow_scripts/build_mikasa_format.py) | 一步生成所有派生文件和 meta.json（**主入口**） |
+| [rbs_sceneflow_scripts/extract_meshes.py](../../rbs_sceneflow_scripts/extract_meshes.py) | PLY 网格提取（被 build_mikasa_format 调用） |
+| [rbs_sceneflow_scripts/generate_target_obj_mask.py](../../rbs_sceneflow_scripts/generate_target_obj_mask.py) | 独立生成 mask npz（单独使用时） |
+| [rbs_sceneflow_scripts/target_objects.json](../../rbs_sceneflow_scripts/target_objects.json) | 每个 task 的目标 body 名称映射表 |
+| [rbs_sceneflow_scripts/build_pose_variants.py](../../rbs_sceneflow_scripts/build_pose_variants.py) | 从已有 body-world pose 生成 cam 位姿变体 |
+| [rbs_sceneflow_scripts/vis_sceneflow.py](../../rbs_sceneflow_scripts/vis_sceneflow.py) | Viser 可视化（`--auto` 自动处理 GL→CV 转换） |
 
 ---
 
@@ -463,15 +463,15 @@ sceneflow（`scene_point_flow_ref*.mp4` + `*.anchor.npy`）**保持 OpenGL 不�
 
 ```bash
 # 处理单个 traj
-python scripts/build_mikasa_format.py \
+python rbs_sceneflow_scripts/build_mikasa_format.py \
     --traj-dir datasets_500_fixed/assembly-v3/camera_data/traj_0
 
 # 处理单个 task
-python scripts/build_mikasa_format.py \
+python rbs_sceneflow_scripts/build_mikasa_format.py \
     --task-dir datasets_500_fixed/assembly-v3
 
 # 处理全量数据集（50 tasks × 50 trajs，8 进程并行，≈4 min）
-python scripts/build_mikasa_format.py \
+python rbs_sceneflow_scripts/build_mikasa_format.py \
     --root datasets_500_fixed \
     -j 8 --overwrite
 
@@ -482,7 +482,7 @@ python /mnt2/liangzhuowei/rbs-data-utils/src/wbs_utils/pack_shards.py \
     --output <output_dir>
 
 # 可视化验证（OpenCV 数据，OpenGL sceneflow 自动转换）
-python vis_sceneflow.py \
+python rbs_sceneflow_scripts/vis_sceneflow.py \
     datasets_500_fixed/assembly-v3/camera_data/traj_0 \
     --auto
 ```

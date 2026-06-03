@@ -17,15 +17,15 @@ Single-camera layout (produced by --camera):
   camera_data/traj_0/
 
 Usage:
-  python scripts/viser_raw_sceneflow_viewer.py \\
+  python rbs_sceneflow_scripts/viser_raw_sceneflow_viewer.py \\
       --traj-dir /path/to/camera_data/traj_0
 
   # pick a specific camera (multi-camera layout)
-  python scripts/viser_raw_sceneflow_viewer.py \\
+  python rbs_sceneflow_scripts/viser_raw_sceneflow_viewer.py \\
       --traj-dir /path/to/camera_data/traj_0 --cam corner2
 
   # pick a specific ref frame
-  python scripts/viser_raw_sceneflow_viewer.py \\
+  python rbs_sceneflow_scripts/viser_raw_sceneflow_viewer.py \\
       --traj-dir /path/to/camera_data/traj_0 --ref 0
 """
 

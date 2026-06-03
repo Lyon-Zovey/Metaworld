@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pack each MetaWorld task into its own webdataset subdirectory.
-# Usage: bash scripts/pack_metaworld_by_task.sh [DATA_ROOT] [OUTPUT_ROOT]
+# Usage: bash rbs_sceneflow_scripts/pack_metaworld_by_task.sh [DATA_ROOT] [OUTPUT_ROOT]
 
 set -e
 

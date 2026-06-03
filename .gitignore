@@ -160,15 +160,11 @@ rollout_data/
 rollout_test/
 tmp_vis/
 dataset/
-datasets/
-datasets_500/
-datasets_1000/
-webdataset_metaworld/
-datasets_500_fix/
-datasets_500_fixed/
-datasets_500_fixed_test/
-webdataset_metaworld_trash/
-test_multicam_out/
+rbs_datasets/
+
+# Bug-produced nested absolute path (脚本相对路径 bug 时产生)
+mnt2/
+**/datasets/_logs/
 
 
 scripts/write_traj_task_json.py
