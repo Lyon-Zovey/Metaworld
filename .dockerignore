@@ -1,0 +1,53 @@
+# What NOT to send to the docker daemon when building.
+# This affects ONLY `docker build`'s upload step and the `COPY . /opt/metaworld`
+# line in the Dockerfile. It does NOT affect git or the runtime.
+
+# Datasets are massive and must never enter the image.
+rbs_datasets/
+datasets_*/
+rollout_data/
+
+# Git internals + worktree state. Image needs the code, not the history.
+.git/
+.gitignore
+.gitattributes
+
+# Python caches / build artifacts.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / editor / OS noise.
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Notebooks' execution state and logs we don't want shipped.
+.ipynb_checkpoints/
+*.log
+
+# Pre-existing tarballs / artifacts (not needed by the build).
+*.tar
+*.tar.gz
+metaworld-pipeline-*.tar.gz
+
+# The packaging dir itself: build.sh / run.sh / Dockerfile / requirements.txt
+# are referenced explicitly by the build, but the image doesn't need them inside
+# /opt/metaworld. Leaving them out keeps the copied code clean.
+packaging/docker/conda-env.tar.gz
+packaging/docker/requirements.lock.txt
+packaging/docker/env.yaml
+
+# Loose top-level temp files that shouldn't be in any release.
+sceneflow_quality.csv
+mnt2/
+
+# Docker / packaging artifacts in worktree.
+*.dockerfile.bak
